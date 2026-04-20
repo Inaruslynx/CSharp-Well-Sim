@@ -2,6 +2,7 @@ using Opc.Ua;
 using Opc.Ua.Client;
 using Opc.Ua.Configuration;
 using System.Collections.Concurrent;
+using static System.Collections.Specialized.BitVector32;
 
 namespace Well_Sim
 {
@@ -16,6 +17,9 @@ namespace Well_Sim
         private readonly Simulator _simulator;
         private readonly SemaphoreSlim _tagWriteGate = new(1, 1);
         private readonly ConcurrentQueue<SimulationSnapshot> _pendingSnapshots = new();
+        private volatile SimulationSnapshot? _latestSnapshot;
+        private CancellationTokenSource? _cts;
+        private Task? _writeLoopTask;
 
         public frmWellSim()
         {
@@ -74,6 +78,7 @@ namespace Well_Sim
                     CancellationToken.None);
 
                 StartSimulation();
+                _writeLoopTask = StartWriteLoopAsync(_session, TimeSpan.FromMilliseconds(1000));
             }
             catch (Exception ex)
             {
@@ -279,8 +284,9 @@ namespace Well_Sim
 
         private void Simulator_SnapshotChanged(SimulationSnapshot snapshot)
         {
-            _pendingSnapshots.Enqueue(snapshot);
-            _ = ProcessPendingSnapshotsAsync();
+            //_pendingSnapshots.Enqueue(snapshot);
+            //_ = ProcessPendingSnapshotsAsync();
+            _latestSnapshot = snapshot;
         }
 
         private async Task ProcessPendingSnapshotsAsync()
@@ -329,9 +335,55 @@ namespace Well_Sim
             }
         }
 
+        private async Task StartWriteLoopAsync(Session session, TimeSpan interval)
+        {
+            CancellationTokenSource cts;
+            lock (this)
+            {
+                _cts?.Cancel();
+                _cts?.Dispose();
+                _cts = new CancellationTokenSource();
+                cts = _cts;
+            }
+
+            using var timer = new PeriodicTimer(interval);
+
+            try
+            {
+                while (await timer.WaitForNextTickAsync(cts.Token))
+                {
+                    var snapshot = _latestSnapshot;
+                    if (snapshot == null)
+                        continue;
+
+                    if (!await _tagWriteGate.WaitAsync(0, cts.Token))
+                    {
+                        continue;
+                    }
+
+                    try
+                    {
+                        if (session.Connected)
+                        {
+                            await WriteSnapshotToIgnitionAsync(session, snapshot);
+                        }
+                    }
+                    finally
+                    {
+                        _tagWriteGate.Release();
+                    }
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                // expected on shutdown
+            }
+        }
+
         private async Task WriteSnapshotToIgnitionAsync(Session session, SimulationSnapshot snapshot)
         {
             var nodesToWrite = new WriteValueCollection();
+            Console.WriteLine("Writing snapshot to Ignition...");
 
             for (int index = 0; index < snapshot.Wells.Count; index++)
             {
@@ -426,6 +478,25 @@ namespace Well_Sim
             if (_session is null)
             {
                 return;
+            }
+
+            CancellationTokenSource? cts;
+            lock (this)
+            {
+                cts = _cts;
+                _cts = null;
+            }
+
+            if (cts is not null)
+            {
+                try
+                {
+                    cts.Cancel();
+                }
+                finally
+                {
+                    cts.Dispose();
+                }
             }
 
             Session session = _session;
