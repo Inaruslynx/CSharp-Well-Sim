@@ -46,6 +46,8 @@
             radBasic256Sha256 = new RadioButton();
             radNone = new RadioButton();
             groupBox3 = new GroupBox();
+            txtRate = new TextBox();
+            label5 = new Label();
             groupBox1.SuspendLayout();
             groupBox2.SuspendLayout();
             groupBox3.SuspendLayout();
@@ -65,7 +67,7 @@
             // btnStop
             // 
             btnStop.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
-            btnStop.Location = new Point(391, 275);
+            btnStop.Location = new Point(367, 275);
             btnStop.Name = "btnStop";
             btnStop.Size = new Size(148, 63);
             btnStop.TabIndex = 1;
@@ -77,9 +79,9 @@
             // 
             txtAddress.Location = new Point(77, 16);
             txtAddress.Name = "txtAddress";
-            txtAddress.Size = new Size(88, 23);
+            txtAddress.Size = new Size(127, 23);
             txtAddress.TabIndex = 2;
-            txtAddress.Text = "192.168.0.27";
+            txtAddress.Text = "192.168.140.240";
             txtAddress.TextAlign = HorizontalAlignment.Right;
             // 
             // label1
@@ -104,7 +106,7 @@
             // 
             txtPort.Location = new Point(77, 47);
             txtPort.Name = "txtPort";
-            txtPort.Size = new Size(88, 23);
+            txtPort.Size = new Size(127, 23);
             txtPort.TabIndex = 5;
             txtPort.Text = "62541";
             txtPort.TextAlign = HorizontalAlignment.Right;
@@ -113,9 +115,9 @@
             // 
             groupBox1.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
             groupBox1.Controls.Add(txtStatus);
-            groupBox1.Location = new Point(237, 33);
+            groupBox1.Location = new Point(21, 206);
             groupBox1.Name = "groupBox1";
-            groupBox1.Size = new Size(302, 63);
+            groupBox1.Size = new Size(494, 63);
             groupBox1.TabIndex = 6;
             groupBox1.TabStop = false;
             groupBox1.Text = "Status";
@@ -127,7 +129,7 @@
             txtStatus.Location = new Point(11, 22);
             txtStatus.Name = "txtStatus";
             txtStatus.ReadOnly = true;
-            txtStatus.Size = new Size(282, 23);
+            txtStatus.Size = new Size(474, 23);
             txtStatus.TabIndex = 0;
             txtStatus.Text = "Off";
             txtStatus.TextAlign = HorizontalAlignment.Right;
@@ -145,7 +147,7 @@
             // 
             txtUsername.Location = new Point(75, 80);
             txtUsername.Name = "txtUsername";
-            txtUsername.Size = new Size(100, 23);
+            txtUsername.Size = new Size(129, 23);
             txtUsername.TabIndex = 8;
             txtUsername.Text = "opcuauser";
             // 
@@ -153,7 +155,7 @@
             // 
             txtPassword.Location = new Point(75, 111);
             txtPassword.Name = "txtPassword";
-            txtPassword.Size = new Size(100, 23);
+            txtPassword.Size = new Size(129, 23);
             txtPassword.TabIndex = 9;
             txtPassword.Text = "password";
             txtPassword.UseSystemPasswordChar = true;
@@ -169,12 +171,11 @@
             // 
             // groupBox2
             // 
-            groupBox2.Anchor = AnchorStyles.Top | AnchorStyles.Right;
             groupBox2.Controls.Add(radAes256_Sha256_RsaPss);
             groupBox2.Controls.Add(radAes128_Sha256_RsaOaep);
             groupBox2.Controls.Add(radBasic256Sha256);
             groupBox2.Controls.Add(radNone);
-            groupBox2.Location = new Point(356, 102);
+            groupBox2.Location = new Point(237, 26);
             groupBox2.Name = "groupBox2";
             groupBox2.Size = new Size(183, 137);
             groupBox2.TabIndex = 11;
@@ -227,6 +228,8 @@
             // 
             // groupBox3
             // 
+            groupBox3.Controls.Add(txtRate);
+            groupBox3.Controls.Add(label5);
             groupBox3.Controls.Add(label1);
             groupBox3.Controls.Add(txtAddress);
             groupBox3.Controls.Add(label4);
@@ -237,16 +240,34 @@
             groupBox3.Controls.Add(label3);
             groupBox3.Location = new Point(21, 26);
             groupBox3.Name = "groupBox3";
-            groupBox3.Size = new Size(194, 144);
+            groupBox3.Size = new Size(210, 173);
             groupBox3.TabIndex = 12;
             groupBox3.TabStop = false;
             groupBox3.Text = "Connection Info";
+            // 
+            // txtRate
+            // 
+            txtRate.Location = new Point(113, 140);
+            txtRate.Name = "txtRate";
+            txtRate.Size = new Size(91, 23);
+            txtRate.TabIndex = 12;
+            txtRate.Text = "500";
+            txtRate.TextAlign = HorizontalAlignment.Right;
+            // 
+            // label5
+            // 
+            label5.AutoSize = true;
+            label5.Location = new Point(6, 144);
+            label5.Name = "label5";
+            label5.Size = new Size(101, 15);
+            label5.TabIndex = 11;
+            label5.Text = "Update Rate (ms):";
             // 
             // frmWellSim
             // 
             AutoScaleDimensions = new SizeF(7F, 15F);
             AutoScaleMode = AutoScaleMode.Font;
-            ClientSize = new Size(551, 350);
+            ClientSize = new Size(527, 350);
             Controls.Add(groupBox3);
             Controls.Add(groupBox2);
             Controls.Add(groupBox1);
@@ -283,5 +304,7 @@
         private RadioButton radBasic256Sha256;
         private RadioButton radNone;
         private GroupBox groupBox3;
+        private TextBox txtRate;
+        private Label label5;
     }
 }

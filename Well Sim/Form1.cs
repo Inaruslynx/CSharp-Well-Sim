@@ -20,6 +20,8 @@ namespace Well_Sim
         private volatile SimulationSnapshot? _latestSnapshot;
         private CancellationTokenSource? _cts;
         private Task? _writeLoopTask;
+        private readonly Dictionary<string, int> _userPinsByRole = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<int, (bool ZipperOpened, bool LowerZipperOpened)> _lastValveStatesByWell = new();
 
         public frmWellSim()
         {
@@ -54,6 +56,14 @@ namespace Well_Sim
                 return;
             }
 
+            if (!int.TryParse(txtRate.Text, out int rate) || rate <= 0)
+            {
+                MessageBox.Show("Enter a valid update rate in milliseconds.", "Invalid Update Rate", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                txtRate.Focus();
+                txtRate.SelectAll();
+                return;
+            }
+
             ToggleControls(isConnecting: true);
             SetStatus("Connecting...");
 
@@ -77,8 +87,9 @@ namespace Well_Sim
                     null,
                     CancellationToken.None);
 
+                await LoadUserPinsAsync(_session);
                 StartSimulation();
-                _writeLoopTask = StartWriteLoopAsync(_session, TimeSpan.FromMilliseconds(1000));
+                _writeLoopTask = StartWriteLoopAsync(_session, TimeSpan.FromMilliseconds(rate));
             }
             catch (Exception ex)
             {
@@ -366,6 +377,7 @@ namespace Well_Sim
                         if (session.Connected)
                         {
                             await WriteSnapshotToIgnitionAsync(session, snapshot);
+                            await SimulateHmiForValveTransitionsAsync(session, snapshot, cts.Token);
                         }
                     }
                     finally
@@ -377,6 +389,184 @@ namespace Well_Sim
             catch (OperationCanceledException)
             {
                 // expected on shutdown
+            }
+        }
+
+        private async Task LoadUserPinsAsync(Session session)
+        {
+            _userPinsByRole.Clear();
+
+            // These names match the exported Ignition tags in `Users and Zipper Pins.json`.
+            var reads = new (string Role, string TagPath)[]
+            {
+                ("VT", $"[{IgnitionTagProvider}]Users/VT/VT User 1/Pin"),
+                ("WSM", $"[{IgnitionTagProvider}]Users/WSM/WSM User 1/Pin"),
+                ("Frac", $"[{IgnitionTagProvider}]Users/Frac/Frac User 1/Pin"),
+                ("Wireline", $"[{IgnitionTagProvider}]Users/Wireline/Wireline User 1/Pin"),
+            };
+
+            foreach (var (role, path) in reads)
+            {
+                int? pin = await TryReadInt32Async(session, path);
+                if (pin.HasValue)
+                {
+                    _userPinsByRole[role] = pin.Value;
+                }
+            }
+        }
+
+        private static async Task<int?> TryReadInt32Async(Session session, string ignitionTagPath)
+        {
+            try
+            {
+                DataValue dv = await session.ReadValueAsync(new NodeId(ignitionTagPath, IgnitionTagNamespaceIndex));
+                if (dv?.Value is null)
+                {
+                    return null;
+                }
+
+                return Convert.ToInt32(dv.Value);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private async Task SimulateHmiForValveTransitionsAsync(Session session, SimulationSnapshot snapshot, CancellationToken ct)
+        {
+            // iterate through wells in snapshot
+            for (int i = 0; i < snapshot.Wells.Count; i++)
+            {
+                WellSnapshot well = snapshot.Wells[i];
+                int wellNumber = i + 1;
+
+                // did the zipper valve open this snapshot?
+                bool zipperOpened = well.Valves.TryGetValue(ValveNames.Zipper, out ValvePositions zipperPos) &&
+                                    zipperPos == ValvePositions.Opened;
+                // did lower zipper valve open this snapshot?
+                bool lowerZipperOpened = well.Valves.TryGetValue(ValveNames.LowerZipper, out ValvePositions lowerPos) &&
+                                         lowerPos == ValvePositions.Opened;
+                bool isActionComplete;
+                if (zipperOpened == lowerZipperOpened)
+                {
+                    isActionComplete = true;
+                }
+                else
+                {
+                    isActionComplete = false;
+                }
+
+                if (!_lastValveStatesByWell.TryGetValue(wellNumber, out var last))
+                {
+                    _lastValveStatesByWell[wellNumber] = (zipperOpened, lowerZipperOpened);
+                    continue;
+                }
+
+                if (zipperOpened != last.ZipperOpened)
+                {
+                    await SimulateHmiZipperActionAsync(session, wellNumber, isLowerZipper: false, open: zipperOpened, ct, isActionComplete);
+                }
+
+                if (lowerZipperOpened != last.LowerZipperOpened)
+                {
+                    await SimulateHmiZipperActionAsync(session, wellNumber, isLowerZipper: true, open: lowerZipperOpened, ct, isActionComplete);
+                }
+
+                _lastValveStatesByWell[wellNumber] = (zipperOpened, lowerZipperOpened);
+            }
+        }
+
+        private async Task SimulateHmiZipperActionAsync(Session session, int wellNumber, bool isLowerZipper, bool open, CancellationToken ct, bool isActionComplete)
+        {
+            string wellBasePath = $"[{IgnitionTagProvider}]{IgnitionPadFolder}/Well{wellNumber}";
+            string zipperPinsBase = $"[{IgnitionTagProvider}]Zipper Pins";
+
+            string modeFracPath = $"{wellBasePath}/HMI/Modes/Frac";
+            string actionName = isLowerZipper
+                ? (open ? "Lower Zipper Open" : "Lower Zipper Close")
+                : (open ? "Zipper Open" : "Zipper Close");
+            string actionPath = $"{wellBasePath}/HMI/Actions/{actionName}";
+
+            var pins = new
+            {
+                VT = _userPinsByRole.TryGetValue("VT", out int vt) ? vt : 0,
+                WSM = _userPinsByRole.TryGetValue("WSM", out int wsm) ? wsm : 0,
+                Frac = _userPinsByRole.TryGetValue("Frac", out int frac) ? frac : 0,
+                Wline = _userPinsByRole.TryGetValue("Wireline", out int wline) ? wline : 0,
+            };
+
+            // 1) Set Frac mode first.
+            await WriteIgnitionTagsAsync(session, new (string Path, object Value)[]
+            {
+                (modeFracPath, true),
+            }, ct);
+
+            // 2) Enter pins into Zipper Pins/* Pin and set * Pin Ok true as they arrive.
+            await WriteIgnitionTagsAsync(session, new (string Path, object Value)[]
+            {
+                ($"{zipperPinsBase}/VT Pin", pins.VT),
+                ($"{zipperPinsBase}/VT Pin Ok", pins.VT != 0),
+                ($"{zipperPinsBase}/WSM Pin", pins.WSM),
+                ($"{zipperPinsBase}/WSM Pin Ok", pins.WSM != 0),
+                ($"{zipperPinsBase}/Frac Pin", pins.Frac),
+                ($"{zipperPinsBase}/Frac Pin Ok", pins.Frac != 0),
+                ($"{zipperPinsBase}/Wline Pin", pins.Wline),
+                ($"{zipperPinsBase}/Wline Pin Ok", pins.Wline != 0),
+            }, ct);
+
+            // 3) Trigger the valve action.
+            await WriteIgnitionTagsAsync(session, new (string Path, object Value)[]
+            {
+                (actionPath, true),
+            }, ct);
+
+            // 4) Clear mode, action, and pins after the "action completes".
+            // This is intentionally short so the HMI sees the transition.
+            await Task.Delay(TimeSpan.FromMilliseconds(500), ct);
+
+            await WriteIgnitionTagsAsync(session, new (string Path, object Value)[]
+            {
+                (modeFracPath, !isActionComplete),
+                (actionPath, false),
+
+                ($"{zipperPinsBase}/VT Pin", 0),
+                ($"{zipperPinsBase}/VT Pin Ok", false),
+                ($"{zipperPinsBase}/WSM Pin", 0),
+                ($"{zipperPinsBase}/WSM Pin Ok", false),
+                ($"{zipperPinsBase}/Frac Pin", 0),
+                ($"{zipperPinsBase}/Frac Pin Ok", false),
+                ($"{zipperPinsBase}/Wline Pin", 0),
+                ($"{zipperPinsBase}/Wline Pin Ok", false),
+            }, ct);
+        }
+
+        private static async Task WriteIgnitionTagsAsync(Session session, IReadOnlyList<(string Path, object Value)> writes, CancellationToken ct)
+        {
+            if (writes.Count == 0)
+            {
+                return;
+            }
+
+            var nodesToWrite = new WriteValueCollection();
+            foreach (var (path, value) in writes)
+            {
+                nodesToWrite.Add(new WriteValue
+                {
+                    NodeId = new NodeId(path, IgnitionTagNamespaceIndex),
+                    AttributeId = Attributes.Value,
+                    Value = new DataValue(new Variant(value))
+                });
+            }
+
+            WriteResponse response = await session.WriteAsync(null, nodesToWrite, ct);
+            for (int i = 0; i < response.Results.Count; i++)
+            {
+                StatusCode status = response.Results[i];
+                if (StatusCode.IsBad(status))
+                {
+                    throw new ServiceResultException(status, $"Ignition write failed for {nodesToWrite[i].NodeId}.");
+                }
             }
         }
 

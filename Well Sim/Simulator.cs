@@ -38,13 +38,32 @@ namespace Well_Sim
     public enum CrewStage
     {
         Idle,
-        CheckingValves,
-        OpeningCrownMaster,
-        ClosingCrownOpeningZipper,
-        Fracing,
-        FinishedFrac,
         PreparingWireline,
-        Wirelining
+        CheckingValves,
+        OpeningInnerPD,
+        OpeningOuterPD,
+        OpeningCrown,
+        RampUpWireline,
+        OpeningMasterWireline,
+        Wirelining,
+        RampDownWireline,
+        ClosingMasterWireline,
+        RampWireline0,
+        ClosingCrown,
+        ClosingOuterPD,
+        ClosingInnerPD,
+        PreparingFrac,
+        OpeningZipper,
+        OpeningLowerZipper,
+        RampUpFrac,
+        OpeningMasterFrac,
+        Fracing,
+        RampDownFrac,
+        ClosingMasterFrac,
+        RampFrac0,
+        ClosingLowerZipper,
+        ClosingZipper,
+        FinishedFrac,
     }
 
     public enum PadColor
@@ -74,6 +93,7 @@ namespace Well_Sim
                 .GetValues<ValveNames>()
                 .ToDictionary(valve => valve, _ => ValvePositions.Closed);
             LastUpdatedUtc = DateTime.UtcNow;
+            WellPressureRamp = PressureRampState.Inactive;
         }
 
         public string Name { get; }
@@ -89,6 +109,18 @@ namespace Well_Sim
         public int TotalFracStages { get; set; }
         public bool JobComplete { get; set; }
         public DateTime LastUpdatedUtc { get; set; }
+
+        public PressureRampState WellPressureRamp { get; set; }
+    }
+
+    internal readonly record struct PressureRampState(
+        bool IsActive,
+        float StartValue,
+        float TargetValue,
+        DateTime StartUtc,
+        TimeSpan Duration)
+    {
+        public static PressureRampState Inactive => new(false, 0, 0, default, default);
     }
 
     internal sealed class PadState
@@ -303,7 +335,7 @@ namespace Well_Sim
 
                 if (activeFracWells > 0)
                 {
-                    Pad.FracPressure = 9500 + _random.Next(-50, 50);
+                    Pad.FracPressure = Math.Max(Pad.FracPressure + _random.Next(-50, 50), 10_350);
                     Pad.PumpRate = 65 + (_random.NextSingle() * 25);
                 }
                 else
@@ -314,22 +346,42 @@ namespace Well_Sim
 
                 foreach (WellState well in Pad.Wells)
                 {
+                    if (well.Valves[ValveNames.InnerPumpDown] == ValvePositions.Opened && well.Valves[ValveNames.OuterPumpDown] == ValvePositions.Opened)
+                    {
+                        well.PumpDownPressure = well.WellPressure + _random.Next(-5, 5);
+                        well.WirelinePressure = well.WellPressure + _random.Next(-5, 5);
+                    }
+
+                    if (well.Valves[ValveNames.LowerZipper] == ValvePositions.Opened && well.Valves[ValveNames.Zipper] == ValvePositions.Opened)
+                    {
+                        well.WellPressure = Pad.FracPressure + _random.Next(-5, 5);
+                    }
+
+                    if (TryApplyWellPressureRamp(well))
+                    {
+                        well.LastUpdatedUtc = DateTime.UtcNow;
+                        continue;
+                    }
+
                     switch (well.Mode)
                     {
                         case OperationMode.Frac:
-                            well.WellPressure = Pad.FracPressure;
-                            well.PumpDownPressure =0;
-                            well.WirelinePressure = 0;
+                            well.WellPressure = Pad.FracPressure + _random.Next(-5, 5);
+                            //well.PumpDownPressure = 0;
+                            //well.WirelinePressure = 0;
                             break;
                         case OperationMode.Wireline:
-                            well.WellPressure = 4800 + _random.Next(-50, 50);
-                            well.PumpDownPressure = 0;
-                            well.WirelinePressure = well.WirelinePressure;
+                            well.WellPressure = 6_200 + _random.Next(-50, 50);
+                            //well.PumpDownPressure = well.WellPressure;
+                            //well.WirelinePressure = well.WellPressure;
                             break;
                         default:
-                            well.WellPressure = Math.Max(0, well.WellPressure - 500);
-                            well.PumpDownPressure = Math.Max(0, well.PumpDownPressure - 300);
-                            well.WirelinePressure = Math.Max(0, well.WirelinePressure - 250);
+                            well.WellPressure = well.WellPressure;
+                            well.PumpDownPressure = well.PumpDownPressure;
+                            well.WirelinePressure = well.WirelinePressure;
+                            //well.WellPressure = Math.Max(0, well.WellPressure - 500);
+                            //well.PumpDownPressure = Math.Max(0, well.PumpDownPressure - 300);
+                            //well.WirelinePressure = Math.Max(0, well.WirelinePressure - 250);
                             break;
                     }
 
@@ -368,13 +420,16 @@ namespace Well_Sim
                     assignedWell.CurrentCrew = crew;
                     Pad.CrewStages[crew] = CrewStage.CheckingValves;
                     status = $"Crew {crew} assigned to {assignedWell.Name} and is checking valves.";
-                    ScheduleCrew(crew, RandomStageDuration(CrewStage.CheckingValves));
+                    TimeSpan stageDuration = RandomStageDuration(CrewStage.CheckingValves);
+                    ApplyStage(assignedWell, crew, CrewStage.CheckingValves, stageDuration);
+                    ScheduleCrew(crew, stageDuration);
                 }
                 else
                 {
                     WellState well = Pad.Wells[wellIndex.Value];
                     CrewStage nextStage = GetNextStage(Pad.CrewStages[crew], well);
-                    ApplyStage(well, crew, nextStage);
+                    TimeSpan stageDuration = RandomStageDuration(nextStage);
+                    ApplyStage(well, crew, nextStage, stageDuration);
                     Pad.CrewStages[crew] = nextStage;
                     status = BuildStageMessage(well, crew, nextStage);
 
@@ -384,7 +439,7 @@ namespace Well_Sim
                         well.CurrentCrew = Crew.None;
                     }
 
-                    ScheduleCrew(crew, RandomStageDuration(nextStage));
+                    ScheduleCrew(crew, stageDuration);
                 }
             }
 
@@ -416,73 +471,214 @@ namespace Well_Sim
         {
             return currentStage switch
             {
-                CrewStage.Idle => CrewStage.CheckingValves,
-                CrewStage.CheckingValves => CrewStage.OpeningCrownMaster,
-                CrewStage.OpeningCrownMaster => CrewStage.ClosingCrownOpeningZipper,
-                CrewStage.ClosingCrownOpeningZipper => CrewStage.Fracing,
-                CrewStage.Fracing => CrewStage.FinishedFrac,
-                CrewStage.FinishedFrac => CrewStage.PreparingWireline,
-                CrewStage.PreparingWireline => CrewStage.Wirelining,
-                CrewStage.Wirelining when well.CompletedStages < well.TotalFracStages => CrewStage.CheckingValves,
-                CrewStage.Wirelining => CrewStage.Idle,
+                CrewStage.Idle => CrewStage.PreparingWireline,
+                CrewStage.PreparingWireline => CrewStage.CheckingValves,
+                CrewStage.CheckingValves => CrewStage.OpeningInnerPD,
+                CrewStage.OpeningInnerPD => CrewStage.OpeningOuterPD,
+                CrewStage.OpeningOuterPD => CrewStage.OpeningCrown,
+                CrewStage.OpeningCrown => CrewStage.RampUpWireline,
+                CrewStage.RampUpWireline =>CrewStage.OpeningMasterWireline,
+                CrewStage.OpeningMasterWireline => CrewStage.Wirelining,
+                CrewStage.Wirelining => CrewStage.RampDownWireline,
+                CrewStage.RampDownWireline => CrewStage.ClosingMasterWireline,
+                CrewStage.ClosingMasterWireline => CrewStage.RampWireline0,
+                CrewStage.RampWireline0 => CrewStage.ClosingCrown,
+                CrewStage.ClosingCrown => CrewStage.ClosingOuterPD,
+                CrewStage.ClosingOuterPD => CrewStage.ClosingInnerPD,
+                CrewStage.ClosingInnerPD => CrewStage.PreparingFrac,
+                CrewStage.PreparingFrac => CrewStage.OpeningZipper,
+                CrewStage.OpeningZipper => CrewStage.OpeningLowerZipper,
+                CrewStage.OpeningLowerZipper => CrewStage.RampUpFrac,
+                CrewStage.RampUpFrac => CrewStage.OpeningMasterFrac,
+                CrewStage.OpeningMasterFrac => CrewStage.Fracing,
+                CrewStage.Fracing => CrewStage.RampDownFrac,
+                CrewStage.RampDownFrac => CrewStage.ClosingMasterFrac,
+                CrewStage.ClosingMasterFrac => CrewStage.RampFrac0,
+                CrewStage.RampFrac0 => CrewStage.ClosingLowerZipper,
+                CrewStage.ClosingLowerZipper => CrewStage.ClosingZipper,
+                CrewStage.ClosingZipper => CrewStage.FinishedFrac,
+                CrewStage.FinishedFrac when well.CompletedStages < well.TotalFracStages => CrewStage.PreparingWireline,
+                CrewStage.FinishedFrac => CrewStage.Idle,
                 _ => CrewStage.Idle
             };
         }
 
-        private void ApplyStage(WellState well, Crew crew, CrewStage stage)
+        private void ApplyStage(WellState well, Crew crew, CrewStage stage, TimeSpan stageDuration)
         {
             well.CurrentCrew = crew;
             well.LastUpdatedUtc = DateTime.UtcNow;
 
             switch (stage)
             {
+                case CrewStage.PreparingWireline:
+                    well.Mode = OperationMode.Standby;
+                    well.WellPressure = 0;
+                    well.PumpDownPressure = 0;
+                    well.WirelinePressure = 0;
+                    SetAllValves(well, ValvePositions.Closed);
+                    well.WellPressureRamp = PressureRampState.Inactive;
+                    break;
                 case CrewStage.CheckingValves:
                     well.Mode = OperationMode.Standby;
+                    well.WellPressure = 0;
+                    well.PumpDownPressure = 0;
+                    well.WirelinePressure = 0;
                     SetAllValves(well, ValvePositions.Closed);
+                    well.WellPressureRamp = PressureRampState.Inactive;
                     break;
-                case CrewStage.OpeningCrownMaster:
-                    well.Valves[ValveNames.Crown] = ValvePositions.Opened;
-                    well.Valves[ValveNames.Master] = ValvePositions.Opened;
-                    well.LastOperatedValve = ValveNames.Master;
+                case CrewStage.OpeningInnerPD:
+                    well.Valves[ValveNames.InnerPumpDown] = ValvePositions.Opened;
+                    well.LastOperatedValve = ValveNames.InnerPumpDown;
                     break;
-                case CrewStage.ClosingCrownOpeningZipper:
-                    well.Valves[ValveNames.Crown] = ValvePositions.Closed;
-                    well.Valves[ValveNames.Zipper] = ValvePositions.Opened;
-                    well.Valves[ValveNames.LowerZipper] = ValvePositions.Opened;
-                    well.LastOperatedValve = ValveNames.Zipper;
+                case CrewStage.OpeningOuterPD:
+                    // Well and PD Pressure linked
+                    well.Valves[ValveNames.OuterPumpDown] = ValvePositions.Opened;
+                    well.LastOperatedValve = ValveNames.OuterPumpDown;
                     break;
-                case CrewStage.Fracing:
-                    well.Mode = OperationMode.Frac;
-                    break;
-                case CrewStage.FinishedFrac:
-                    well.CompletedStages++;
-                    well.Mode = OperationMode.Standby;
-                    well.Valves[ValveNames.LowerZipper] = ValvePositions.Closed;
-                    well.Valves[ValveNames.Zipper] = ValvePositions.Closed;
-                    well.LastOperatedValve = ValveNames.Zipper;
-                    break;
-                case CrewStage.PreparingWireline:
-                    well.Mode = OperationMode.Wireline;
-                    well.Valves[ValveNames.Equalizing] = ValvePositions.Opened;
+                case CrewStage.OpeningCrown:
                     well.Valves[ValveNames.Crown] = ValvePositions.Opened;
                     well.LastOperatedValve = ValveNames.Crown;
                     break;
-                case CrewStage.Wirelining:
+                case CrewStage.RampUpWireline:
                     well.Mode = OperationMode.Wireline;
-                    well.Valves[ValveNames.OuterPumpDown] = ValvePositions.Opened;
-                    well.Valves[ValveNames.InnerPumpDown] = ValvePositions.Opened;
+                    BeginWellPressureRamp(well, 4_200 + _random.Next(50, 150), stageDuration);
+                    break;
+                case CrewStage.OpeningMasterWireline:
+                    well.Valves[ValveNames.Master] = ValvePositions.Opened;
+                    well.LastOperatedValve = ValveNames.Master;
+                    break;
+                case CrewStage.Wirelining:
+                    BeginWellPressureRamp(well, 6_200 + _random.Next(50, 150), TimeSpan.FromSeconds(4));
+                    break;
+                case CrewStage.RampDownWireline:
+                    BeginWellPressureRamp(well, 4_200 + _random.Next(50, 150), stageDuration);
+                    break;
+                case CrewStage.ClosingMasterWireline:
+                    well.Valves[ValveNames.Master] = ValvePositions.Closed;
+                    well.LastOperatedValve = ValveNames.Master;
+                    break;
+                case CrewStage.RampWireline0:
+                    BeginWellPressureRamp(well, 0, stageDuration);
+                    break;
+                case CrewStage.ClosingCrown:
+                    well.WellPressureRamp = PressureRampState.Inactive;
+                    well.Mode = OperationMode.Standby;
+                    well.WellPressure = 0;
+                    well.PumpDownPressure = 0;
+                    well.WirelinePressure = 0;
+                    well.Valves[ValveNames.Crown] = ValvePositions.Closed;
+                    well.LastOperatedValve = ValveNames.Crown;
+                    break;
+                case CrewStage.ClosingOuterPD:
+                    well.Valves[ValveNames.OuterPumpDown] = ValvePositions.Closed;
+                    well.LastOperatedValve = ValveNames.OuterPumpDown;
+                    break;
+                case CrewStage.ClosingInnerPD:
+                    well.Valves[ValveNames.InnerPumpDown] = ValvePositions.Closed;
                     well.LastOperatedValve = ValveNames.InnerPumpDown;
+                    break;
+
+                case CrewStage.PreparingFrac:
+                    well.Mode = OperationMode.Standby;
+                    well.WellPressure = 0;
+                    break;
+                case CrewStage.OpeningZipper:
+                    well.Valves[ValveNames.Zipper] = ValvePositions.Opened;
+                    well.LastOperatedValve = ValveNames.Zipper;
+                    break;
+                case CrewStage.OpeningLowerZipper:
+                    well.Valves[ValveNames.LowerZipper] = ValvePositions.Opened;
+                    well.LastOperatedValve = ValveNames.LowerZipper;
+                    break;
+                case CrewStage.RampUpFrac:
+                    BeginWellPressureRamp(well, 4_200 + _random.Next(50, 150), stageDuration);
+                    break;
+                case CrewStage.OpeningMasterFrac:
+                    well.Valves[ValveNames.Master] = ValvePositions.Opened;
+                    well.LastOperatedValve = ValveNames.Master;
+                    break;
+                case CrewStage.Fracing:
+                    well.Mode = OperationMode.Frac;
+                    BeginWellPressureRamp(well, 10_300, stageDuration);
+                    well.WellPressureRamp = PressureRampState.Inactive;
+                    break;
+                case CrewStage.RampDownFrac:
+                    well.Mode = OperationMode.Standby;
+                    BeginWellPressureRamp(well, 4_200 + _random.Next(50, 150), stageDuration);
+                    break;
+                case CrewStage.ClosingMasterFrac:
+                    well.Valves[ValveNames.Master] = ValvePositions.Closed;
+                    well.LastOperatedValve = ValveNames.Master;
+                    break;
+                case CrewStage.RampFrac0:
+                    BeginWellPressureRamp(well, 0, stageDuration);
+                    break;
+                case CrewStage.ClosingLowerZipper:
+                    well.Valves[ValveNames.LowerZipper] = ValvePositions.Closed;
+                    well.LastOperatedValve = ValveNames.LowerZipper;
+                    break;
+                case CrewStage.ClosingZipper:
+                    well.Mode = OperationMode.Standby;
+                    well.WellPressureRamp = PressureRampState.Inactive;
+                    well.Valves[ValveNames.Zipper] = ValvePositions.Closed;
+                    well.LastOperatedValve = ValveNames.Zipper;
+                    break;
+                case CrewStage.FinishedFrac:
+                    well.CompletedStages++;
                     break;
                 case CrewStage.Idle:
                     well.Mode = OperationMode.Standby;
                     SetAllValves(well, ValvePositions.Closed);
-                    well.WellPressure = 4800 + _random.Next(50, 150);
                     well.PumpDownPressure = 0;
                     well.WirelinePressure = 0;
+                    well.WellPressureRamp = PressureRampState.Inactive;
                     well.CompletedStages = 0;
                     well.TotalFracStages = _random.Next(3, 7);
                     break;
             }
+        }
+
+        /// <summary>
+        /// Use inside an `ApplyStage` case to ramp `WellPressure` from its current value
+        /// to `targetPressure` over the current crew stage duration.
+        /// </summary>
+        private static void BeginWellPressureRamp(WellState well, float targetPressure, TimeSpan duration)
+        {
+            if (duration <= TimeSpan.Zero)
+            {
+                well.WellPressure = targetPressure;
+                well.WellPressureRamp = PressureRampState.Inactive;
+                return;
+            }
+
+            well.WellPressureRamp = new PressureRampState(
+                IsActive: true,
+                StartValue: well.WellPressure,
+                TargetValue: targetPressure,
+                StartUtc: DateTime.UtcNow,
+                Duration: duration);
+        }
+
+        private static bool TryApplyWellPressureRamp(WellState well)
+        {
+            PressureRampState ramp = well.WellPressureRamp;
+            if (!ramp.IsActive)
+            {
+                return false;
+            }
+
+            TimeSpan elapsed = DateTime.UtcNow - ramp.StartUtc;
+            if (elapsed >= ramp.Duration)
+            {
+                well.WellPressure = ramp.TargetValue;
+                well.WellPressureRamp = PressureRampState.Inactive;
+                return true;
+            }
+
+            double t = elapsed.TotalMilliseconds / ramp.Duration.TotalMilliseconds;
+            t = Math.Clamp(t, 0.0, 1.0);
+            well.WellPressure = (float)(ramp.StartValue + ((ramp.TargetValue - ramp.StartValue) * t));
+            return true;
         }
 
         private static void SetAllValves(WellState well, ValvePositions position)
@@ -498,13 +694,32 @@ namespace Well_Sim
             return stage switch
             {
                 CrewStage.Idle => TimeSpan.FromSeconds(_random.Next(2, 4)),
-                CrewStage.CheckingValves => TimeSpan.FromSeconds(_random.Next(2, 5)),
-                CrewStage.OpeningCrownMaster => TimeSpan.FromSeconds(_random.Next(4, 8)),
-                CrewStage.ClosingCrownOpeningZipper => TimeSpan.FromSeconds(_random.Next(4, 8)),
-                CrewStage.Fracing => TimeSpan.FromSeconds(_random.Next(25, 35)),
+                CrewStage.PreparingWireline => TimeSpan.FromSeconds(_random.Next(2, 3)),
+                CrewStage.CheckingValves => TimeSpan.FromSeconds(_random.Next(2, 3)),
+                CrewStage.OpeningInnerPD => TimeSpan.FromSeconds(_random.Next(2, 3)),
+                CrewStage.OpeningOuterPD => TimeSpan.FromSeconds(_random.Next(2, 3)),
+                CrewStage.OpeningCrown => TimeSpan.FromSeconds(_random.Next(2, 3)),
+                CrewStage.RampUpWireline => TimeSpan.FromSeconds(_random.Next(5, 6)),
+                CrewStage.OpeningMasterWireline => TimeSpan.FromSeconds(_random.Next(2, 3)),
+                CrewStage.Wirelining => TimeSpan.FromSeconds(_random.Next(12, 18)),
+                CrewStage.RampDownWireline => TimeSpan.FromSeconds(_random.Next(5, 6)),
+                CrewStage.ClosingMasterWireline => TimeSpan.FromSeconds(_random.Next(2, 3)),
+                CrewStage.RampWireline0 => TimeSpan.FromSeconds(_random.Next(3, 4)),
+                CrewStage.ClosingCrown => TimeSpan.FromSeconds(_random.Next(2, 3)),
+                CrewStage.ClosingOuterPD => TimeSpan.FromSeconds(_random.Next(2, 3)),
+                CrewStage.ClosingInnerPD => TimeSpan.FromSeconds(_random.Next(2, 3)),
+                CrewStage.PreparingFrac => TimeSpan.FromSeconds(_random.Next(2, 3)),
+                CrewStage.OpeningZipper => TimeSpan.FromSeconds(_random.Next(2, 3)),
+                CrewStage.OpeningLowerZipper => TimeSpan.FromSeconds(_random.Next(2, 3)),
+                CrewStage.RampUpFrac => TimeSpan.FromSeconds(_random.Next(5, 7)),
+                CrewStage.OpeningMasterFrac => TimeSpan.FromSeconds(_random.Next(2, 3)),
+                CrewStage.Fracing => TimeSpan.FromSeconds(_random.Next(15, 20)),
+                CrewStage.RampDownFrac => TimeSpan.FromSeconds(_random.Next(5, 7)),
+                CrewStage.ClosingMasterFrac => TimeSpan.FromSeconds(_random.Next(2, 3)),
+                CrewStage.RampFrac0 => TimeSpan.FromSeconds(_random.Next(3, 4)),
+                CrewStage.ClosingLowerZipper => TimeSpan.FromSeconds(_random.Next(2, 3)),
+                CrewStage.ClosingZipper => TimeSpan.FromSeconds(_random.Next(2, 3)),
                 CrewStage.FinishedFrac => TimeSpan.FromSeconds(_random.Next(2, 4)),
-                CrewStage.PreparingWireline => TimeSpan.FromSeconds(_random.Next(3, 6)),
-                CrewStage.Wirelining => TimeSpan.FromSeconds(_random.Next(20, 25)),
                 _ => TimeSpan.FromSeconds(3)
             };
         }
@@ -513,14 +728,33 @@ namespace Well_Sim
         {
             return stage switch
             {
-                CrewStage.OpeningCrownMaster => $"Crew {crew} opened the crown and master valves on {well.Name}.",
-                CrewStage.ClosingCrownOpeningZipper => $"Crew {crew} lined up {well.Name} to the zipper manifold.",
-                CrewStage.Fracing => $"Crew {crew} is pumping frac stage {well.CompletedStages + 1} of {well.TotalFracStages} on {well.Name}.",
-                CrewStage.FinishedFrac when well.CompletedStages < well.TotalFracStages => $"Crew {crew} finished frac stage {well.CompletedStages} of {well.TotalFracStages} on {well.Name}.",
-                CrewStage.FinishedFrac => $"Crew {crew} finished the final frac stage on {well.Name}.",
                 CrewStage.PreparingWireline => $"Crew {crew} is rigging up wireline after frac stage {well.CompletedStages} on {well.Name}.",
+                CrewStage.OpeningInnerPD => $"Crew {crew} opened the inner pump down valve on {well.Name}.",
+                CrewStage.OpeningOuterPD => $"Crew {crew} opened the outer pump down valve on {well.Name}.",
+                CrewStage.OpeningCrown => $"Crew {crew} opened the crown valve on {well.Name}.",
+                CrewStage.RampUpWireline => $"Crew {crew} is ramping up wireline pressure on {well.Name}.",
+                CrewStage.OpeningMasterWireline => $"Crew {crew} opened the master valve for wireline on {well.Name}.",
                 CrewStage.Wirelining when well.CompletedStages < well.TotalFracStages => $"Crew {crew} completed the wireline run for stage {well.CompletedStages} on {well.Name} and is moving to the next frac stage.",
                 CrewStage.Wirelining => $"Crew {crew} is performing the final wireline run on {well.Name}.",
+                CrewStage.RampDownWireline => $"Crew {crew} is ramping down wireline pressure on {well.Name}.",
+                CrewStage.ClosingMasterWireline => $"Crew {crew} closed the master valve for wireline on {well.Name}.",
+                CrewStage.RampWireline0 => $"Crew {crew} is bleeding off remaining wireline pressure on {well.Name}.",
+                CrewStage.ClosingCrown => $"Crew {crew} closed the crown valve on {well.Name}.",
+                CrewStage.ClosingOuterPD => $"Crew {crew} closed the outer pump down valve on {well.Name}.",
+                CrewStage.ClosingInnerPD => $"Crew {crew} closed the inner pump down valve on {well.Name}.",
+                CrewStage.PreparingFrac => $"Crew {crew} is preparing for the next frac stage on {well.Name}.",
+                CrewStage.OpeningZipper => $"Crew {crew} opened the zipper valve on {well.Name}.",
+                CrewStage.OpeningLowerZipper => $"Crew {crew} opened the lower zipper valve on {well.Name}.",
+                CrewStage.RampUpFrac => $"Crew {crew} is ramping up frac pressure on {well.Name}.",
+                CrewStage.OpeningMasterFrac => $"Crew {crew} opened the master valve for frac on {well.Name}.",
+                CrewStage.Fracing => $"Crew {crew} is pumping frac stage {well.CompletedStages + 1} of {well.TotalFracStages} on {well.Name}.",
+                CrewStage.RampDownFrac => $"Crew {crew} is ramping down frac pressure on {well.Name}.",
+                CrewStage.ClosingMasterFrac => $"Crew {crew} closed the master valve for frac on {well.Name}.",
+                CrewStage.RampFrac0 => $"Crew {crew} is bleeding off remaining frac pressure on {well.Name}.",
+                CrewStage.ClosingLowerZipper => $"Crew {crew} closed the lower zipper valve on {well.Name}.",
+                CrewStage.ClosingZipper => $"Crew {crew} closed the zipper valve on {well.Name}.",
+                CrewStage.FinishedFrac when well.CompletedStages < well.TotalFracStages => $"Crew {crew} finished frac stage {well.CompletedStages} of {well.TotalFracStages} on {well.Name}.",
+                CrewStage.FinishedFrac => $"Crew {crew} finished the final frac stage on {well.Name}.",
                 CrewStage.Idle => $"Crew {crew} wrapped up {well.Name} and is ready for the next assignment.",
                 _ => $"Crew {crew} is working {stage} on {well.Name}."
             };
