@@ -139,6 +139,7 @@ namespace Well_Sim
 
             FracPressure = 0.0f;
             PumpRate = 0.0f;
+            FracPressureRamp = PressureRampState.Inactive;
         }
 
         public List<WellState> Wells { get; }
@@ -146,6 +147,7 @@ namespace Well_Sim
         public Dictionary<Crew, CrewStage> CrewStages { get; }
         public float FracPressure { get; set; }
         public float PumpRate { get; set; }
+        public PressureRampState FracPressureRamp { get; set; }
 
         private static List<WellState> BuildDefaultWells()
         {
@@ -319,6 +321,7 @@ namespace Well_Sim
 
             Pad.FracPressure = 0;
             Pad.PumpRate = 0;
+            Pad.FracPressureRamp = PressureRampState.Inactive;
         }
 
         private void PadTimerElapsed(object? sender, ElapsedEventArgs e)
@@ -332,16 +335,37 @@ namespace Well_Sim
 
                 int activeFracWells = Pad.Wells.Count(well => well.Mode == OperationMode.Frac);
                 int activeWirelineWells = Pad.Wells.Count(well => well.Mode == OperationMode.Wireline);
+                bool zipperLinedUp = Pad.Wells.Any(well =>
+                    well.Valves[ValveNames.LowerZipper] == ValvePositions.Opened &&
+                    well.Valves[ValveNames.Zipper] == ValvePositions.Opened);
 
-                if (activeFracWells > 0)
+                // "Frac pressure" should not instantly jump just because a well is lined up to the zipper.
+                // Only actual frac mode or an explicit ramp should drive Pad.FracPressure upward.
+                bool fracHydraulicsActive = activeFracWells > 0 || Pad.FracPressureRamp.IsActive;
+
+                if (fracHydraulicsActive)
                 {
-                    Pad.FracPressure = Math.Max(Pad.FracPressure + _random.Next(-50, 50), 10_350);
-                    Pad.PumpRate = 65 + (_random.NextSingle() * 25);
+                    if (!TryApplyPadFracPressureRamp(Pad))
+                    {
+                        // Keep frac pressure roughly near the intended max once active (during Frac mode).
+                        Pad.FracPressure = Math.Max(Pad.FracPressure + _random.Next(-50, 50), 10_300);
+                        Pad.PumpRate = 65 + (_random.NextSingle() * 25);
+                    }
+                }
+                else if (zipperLinedUp && Pad.FracPressure > 0.01f)
+                {
+                    // While lined up to the frac manifold (but before Frac mode starts), hold pressure steady.
+                    // This prevents a mid-sequence drop (e.g., during OpeningMasterFrac) without reintroducing
+                    // an artificial jump to max.
+                    Pad.FracPressure = Math.Max(0, Pad.FracPressure + _random.Next(-10, 10));
+                    Pad.PumpRate = Math.Max(0, Pad.PumpRate - 4);
+                    Pad.FracPressureRamp = PressureRampState.Inactive;
                 }
                 else
                 {
                     Pad.FracPressure = Math.Max(0, Pad.FracPressure - 1800);
                     Pad.PumpRate = Math.Max(0, Pad.PumpRate - 12);
+                    Pad.FracPressureRamp = PressureRampState.Inactive;
                 }
 
                 foreach (WellState well in Pad.Wells)
@@ -350,11 +374,6 @@ namespace Well_Sim
                     {
                         well.PumpDownPressure = well.WellPressure + _random.Next(-5, 5);
                         well.WirelinePressure = well.WellPressure + _random.Next(-5, 5);
-                    }
-
-                    if (well.Valves[ValveNames.LowerZipper] == ValvePositions.Opened && well.Valves[ValveNames.Zipper] == ValvePositions.Opened)
-                    {
-                        well.WellPressure = Pad.FracPressure + _random.Next(-5, 5);
                     }
 
                     if (TryApplyWellPressureRamp(well))
@@ -376,6 +395,11 @@ namespace Well_Sim
                             //well.WirelinePressure = well.WellPressure;
                             break;
                         default:
+                            if (well.Valves[ValveNames.LowerZipper] == ValvePositions.Opened &&
+                                well.Valves[ValveNames.Zipper] == ValvePositions.Opened)
+                            {
+                                well.WellPressure = Pad.FracPressure + _random.Next(-5, 5);
+                            }
                             well.WellPressure = well.WellPressure;
                             well.PumpDownPressure = well.PumpDownPressure;
                             well.WirelinePressure = well.WirelinePressure;
@@ -554,6 +578,9 @@ namespace Well_Sim
                     BeginWellPressureRamp(well, 4_200 + _random.Next(50, 150), stageDuration);
                     break;
                 case CrewStage.ClosingMasterWireline:
+                    // Prevent `PadTimerElapsed` from snapping pressure back to the "wireline steady-state" (6,200)
+                    // between the end of RampDownWireline and the start of RampWireline0.
+                    well.Mode = OperationMode.Standby;
                     well.Valves[ValveNames.Master] = ValvePositions.Closed;
                     well.LastOperatedValve = ValveNames.Master;
                     break;
@@ -562,7 +589,6 @@ namespace Well_Sim
                     break;
                 case CrewStage.ClosingCrown:
                     well.WellPressureRamp = PressureRampState.Inactive;
-                    well.Mode = OperationMode.Standby;
                     well.WellPressure = 0;
                     well.PumpDownPressure = 0;
                     well.WirelinePressure = 0;
@@ -581,6 +607,7 @@ namespace Well_Sim
                 case CrewStage.PreparingFrac:
                     well.Mode = OperationMode.Standby;
                     well.WellPressure = 0;
+                    Pad.FracPressure = 0;
                     break;
                 case CrewStage.OpeningZipper:
                     well.Valves[ValveNames.Zipper] = ValvePositions.Opened;
@@ -591,34 +618,41 @@ namespace Well_Sim
                     well.LastOperatedValve = ValveNames.LowerZipper;
                     break;
                 case CrewStage.RampUpFrac:
-                    BeginWellPressureRamp(well, 4_200 + _random.Next(50, 150), stageDuration);
+                    well.WellPressureRamp = PressureRampState.Inactive;
+                    Pad.FracPressure = 0;
+                    BeginPadFracPressureRamp(Pad, 4_200, stageDuration);
                     break;
                 case CrewStage.OpeningMasterFrac:
                     well.Valves[ValveNames.Master] = ValvePositions.Opened;
                     well.LastOperatedValve = ValveNames.Master;
                     break;
                 case CrewStage.Fracing:
+                    BeginPadFracPressureRamp(Pad, 10_300 + _random.Next(50, 150), TimeSpan.FromSeconds(6));
                     well.Mode = OperationMode.Frac;
-                    BeginWellPressureRamp(well, 10_300, stageDuration);
                     well.WellPressureRamp = PressureRampState.Inactive;
                     break;
                 case CrewStage.RampDownFrac:
+                    well.WellPressureRamp = PressureRampState.Inactive;
+                    // Stop treating this well as actively fracing so PadTimerElapsed won't clamp Pad.FracPressure
+                    // back up to the max once the ramp completes.
                     well.Mode = OperationMode.Standby;
-                    BeginWellPressureRamp(well, 4_200 + _random.Next(50, 150), stageDuration);
+                    BeginPadFracPressureRamp(Pad, 4_200 + _random.Next(50, 150), stageDuration);
                     break;
                 case CrewStage.ClosingMasterFrac:
                     well.Valves[ValveNames.Master] = ValvePositions.Closed;
                     well.LastOperatedValve = ValveNames.Master;
                     break;
                 case CrewStage.RampFrac0:
-                    BeginWellPressureRamp(well, 0, stageDuration);
+                    well.WellPressureRamp = PressureRampState.Inactive;
+                    BeginPadFracPressureRamp(Pad, 0, stageDuration);
                     break;
                 case CrewStage.ClosingLowerZipper:
+                    well.Mode = OperationMode.Standby;
+                    well.WellPressure = 0;
                     well.Valves[ValveNames.LowerZipper] = ValvePositions.Closed;
                     well.LastOperatedValve = ValveNames.LowerZipper;
                     break;
                 case CrewStage.ClosingZipper:
-                    well.Mode = OperationMode.Standby;
                     well.WellPressureRamp = PressureRampState.Inactive;
                     well.Valves[ValveNames.Zipper] = ValvePositions.Closed;
                     well.LastOperatedValve = ValveNames.Zipper;
@@ -678,6 +712,45 @@ namespace Well_Sim
             double t = elapsed.TotalMilliseconds / ramp.Duration.TotalMilliseconds;
             t = Math.Clamp(t, 0.0, 1.0);
             well.WellPressure = (float)(ramp.StartValue + ((ramp.TargetValue - ramp.StartValue) * t));
+            return true;
+        }
+
+        private static void BeginPadFracPressureRamp(PadState pad, float targetPressure, TimeSpan duration)
+        {
+            if (duration <= TimeSpan.Zero)
+            {
+                pad.FracPressure = targetPressure;
+                pad.FracPressureRamp = PressureRampState.Inactive;
+                return;
+            }
+
+            pad.FracPressureRamp = new PressureRampState(
+                IsActive: true,
+                StartValue: pad.FracPressure,
+                TargetValue: targetPressure,
+                StartUtc: DateTime.UtcNow,
+                Duration: duration);
+        }
+
+        private static bool TryApplyPadFracPressureRamp(PadState pad)
+        {
+            PressureRampState ramp = pad.FracPressureRamp;
+            if (!ramp.IsActive)
+            {
+                return false;
+            }
+
+            TimeSpan elapsed = DateTime.UtcNow - ramp.StartUtc;
+            if (elapsed >= ramp.Duration)
+            {
+                pad.FracPressure = ramp.TargetValue;
+                pad.FracPressureRamp = PressureRampState.Inactive;
+                return true;
+            }
+
+            double t = elapsed.TotalMilliseconds / ramp.Duration.TotalMilliseconds;
+            t = Math.Clamp(t, 0.0, 1.0);
+            pad.FracPressure = (float)(ramp.StartValue + ((ramp.TargetValue - ramp.StartValue) * t));
             return true;
         }
 
