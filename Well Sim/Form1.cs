@@ -2,6 +2,7 @@ using Opc.Ua;
 using Opc.Ua.Client;
 using Opc.Ua.Configuration;
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using static System.Collections.Specialized.BitVector32;
 
 namespace Well_Sim
@@ -523,7 +524,7 @@ namespace Well_Sim
 
             // 4) Clear mode, action, and pins after the "action completes".
             // This is intentionally short so the HMI sees the transition.
-            await Task.Delay(TimeSpan.FromMilliseconds(500), ct);
+            await Task.Delay(TimeSpan.FromMilliseconds(2000), ct);
 
             await WriteIgnitionTagsAsync(session, new (string Path, object Value)[]
             {
@@ -573,7 +574,7 @@ namespace Well_Sim
         private async Task WriteSnapshotToIgnitionAsync(Session session, SimulationSnapshot snapshot)
         {
             var nodesToWrite = new WriteValueCollection();
-            Console.WriteLine("Writing snapshot to Ignition...");
+            Debug.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] Writing snapshot to Ignition...");
 
             for (int index = 0; index < snapshot.Wells.Count; index++)
             {
@@ -637,6 +638,8 @@ namespace Well_Sim
                     throw new ServiceResultException(status, $"Ignition write failed for {nodesToWrite[i].NodeId}.");
                 }
             }
+
+            Debug.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] Wrote snapshot ({nodesToWrite.Count} tags).");
         }
 
         private static bool IsValveOpen(WellSnapshot well, ValveNames valve) =>

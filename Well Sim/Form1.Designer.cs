@@ -175,7 +175,7 @@
             groupBox2.Controls.Add(radAes128_Sha256_RsaOaep);
             groupBox2.Controls.Add(radBasic256Sha256);
             groupBox2.Controls.Add(radNone);
-            groupBox2.Location = new Point(237, 26);
+            groupBox2.Location = new Point(237, 12);
             groupBox2.Name = "groupBox2";
             groupBox2.Size = new Size(183, 137);
             groupBox2.TabIndex = 11;
@@ -238,7 +238,7 @@
             groupBox3.Controls.Add(txtPort);
             groupBox3.Controls.Add(txtUsername);
             groupBox3.Controls.Add(label3);
-            groupBox3.Location = new Point(21, 26);
+            groupBox3.Location = new Point(21, 12);
             groupBox3.Name = "groupBox3";
             groupBox3.Size = new Size(210, 173);
             groupBox3.TabIndex = 12;
