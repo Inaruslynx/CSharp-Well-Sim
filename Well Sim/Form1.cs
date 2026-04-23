@@ -23,6 +23,7 @@ namespace Well_Sim
         private Task? _writeLoopTask;
         private readonly Dictionary<string, int> _userPinsByRole = new(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<int, (bool ZipperOpened, bool LowerZipperOpened)> _lastValveStatesByWell = new();
+        private bool _sentInitialFullSnapshot;
 
         public frmWellSim()
         {
@@ -89,6 +90,7 @@ namespace Well_Sim
                     CancellationToken.None);
 
                 await LoadUserPinsAsync(_session);
+                _sentInitialFullSnapshot = false;
                 StartSimulation();
                 _writeLoopTask = StartWriteLoopAsync(_session, TimeSpan.FromMilliseconds(rate));
             }
@@ -330,7 +332,8 @@ namespace Well_Sim
                     return;
                 }
 
-                await WriteSnapshotToIgnitionAsync(_session, latestSnapshot);
+                await WriteSnapshotToIgnitionAsync(_session, latestSnapshot, sendAllWells: !_sentInitialFullSnapshot);
+                _sentInitialFullSnapshot = true;
             }
             catch (Exception ex)
             {
@@ -377,7 +380,8 @@ namespace Well_Sim
                     {
                         if (session.Connected)
                         {
-                            await WriteSnapshotToIgnitionAsync(session, snapshot);
+                            await WriteSnapshotToIgnitionAsync(session, snapshot, sendAllWells: !_sentInitialFullSnapshot);
+                            _sentInitialFullSnapshot = true;
                             await SimulateHmiForValveTransitionsAsync(session, snapshot, cts.Token);
                         }
                     }
@@ -571,57 +575,22 @@ namespace Well_Sim
             }
         }
 
-        private async Task WriteSnapshotToIgnitionAsync(Session session, SimulationSnapshot snapshot)
+        private async Task WriteSnapshotToIgnitionAsync(Session session, SimulationSnapshot snapshot, bool sendAllWells)
         {
             var nodesToWrite = new WriteValueCollection();
-            Debug.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] Writing snapshot to Ignition...");
+            Debug.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] Writing snapshot to Ignition... (allWells={sendAllWells})");
 
-            for (int index = 0; index < snapshot.Wells.Count; index++)
+            if (sendAllWells)
             {
-                WellSnapshot well = snapshot.Wells[index];
-                string wellBasePath = $"[{IgnitionTagProvider}]{IgnitionPadFolder}/Well{index + 1}";
-
-                AddWrite(nodesToWrite, wellBasePath, "Name", well.Name);
-                AddWrite(nodesToWrite, wellBasePath, "Last Known Name", well.Name);
-                AddWrite(nodesToWrite, wellBasePath, "Mode", GetIgnitionModeValue(well.Mode));
-                AddWrite(nodesToWrite, wellBasePath, "Color", (int)well.Color);
-                AddWrite(nodesToWrite, wellBasePath, "WellPressure", Convert.ToInt32(Math.Round(well.WellPressure)));
-                AddWrite(nodesToWrite, wellBasePath, "PumpdownPressure", Convert.ToInt32(Math.Round(well.PumpDownPressure)));
-                AddWrite(nodesToWrite, wellBasePath, "FracPressure", Convert.ToInt32(Math.Round(snapshot.FracPressure)));
-                AddWrite(nodesToWrite, wellBasePath, "WirelinePressure", Convert.ToInt32(Math.Round(well.WirelinePressure)));
-                AddWrite(nodesToWrite, wellBasePath, "Wireline A Selected", well.CurrentCrew == Crew.A);
-                //AddWrite(nodesToWrite, wellBasePath, "Wireline B Selected", well.CurrentCrew == Crew.B);
-
-                AddWrite(nodesToWrite, wellBasePath, "CrownOpened", IsValveOpen(well, ValveNames.Crown));
-                AddWrite(nodesToWrite, wellBasePath, "CrownClosed", IsValveClosed(well, ValveNames.Crown));
-                AddWrite(nodesToWrite, wellBasePath, "ZipperOpened", IsValveOpen(well, ValveNames.Zipper));
-                AddWrite(nodesToWrite, wellBasePath, "ZipperClosed", IsValveClosed(well, ValveNames.Zipper));
-                AddWrite(nodesToWrite, wellBasePath, "PDEqualOpened", IsValveOpen(well, ValveNames.Equalizing));
-                AddWrite(nodesToWrite, wellBasePath, "PDEqualClosed", IsValveClosed(well, ValveNames.Equalizing));
-                AddWrite(nodesToWrite, wellBasePath, "InnerPD Opened", IsValveOpen(well, ValveNames.InnerPumpDown));
-                AddWrite(nodesToWrite, wellBasePath, "InnerPD Closed", IsValveClosed(well, ValveNames.InnerPumpDown));
-                AddWrite(nodesToWrite, wellBasePath, "OuterPDOpened", IsValveOpen(well, ValveNames.OuterPumpDown));
-                AddWrite(nodesToWrite, wellBasePath, "OuterPDClosed", IsValveClosed(well, ValveNames.OuterPumpDown));
-                AddWrite(nodesToWrite, wellBasePath, "Inner Flowback Opened", IsValveOpen(well, ValveNames.InnerFlowback));
-                AddWrite(nodesToWrite, wellBasePath, "Inner Flowback Closed", IsValveClosed(well, ValveNames.InnerFlowback));
-                AddWrite(nodesToWrite, wellBasePath, "Outer Flowback Opened", IsValveOpen(well, ValveNames.OuterFlowback));
-                AddWrite(nodesToWrite, wellBasePath, "Outer Flowback Closed", IsValveClosed(well, ValveNames.OuterFlowback));
-                AddWrite(nodesToWrite, wellBasePath, "HMV Opened", IsValveOpen(well, ValveNames.Master));
-                AddWrite(nodesToWrite, wellBasePath, "HMV Closed", IsValveClosed(well, ValveNames.Master));
-                AddWrite(nodesToWrite, wellBasePath, "Lower Zipper Opened", IsValveOpen(well, ValveNames.LowerZipper));
-                AddWrite(nodesToWrite, wellBasePath, "Lower Zipper Closed", IsValveClosed(well, ValveNames.LowerZipper));
-
-                AddWrite(nodesToWrite, wellBasePath, "Alarms/Crown_Open", well.Mode == OperationMode.Frac && IsValveOpen(well, ValveNames.Crown));
-                AddWrite(nodesToWrite, wellBasePath, "Alarms/Crown_NotClosed", well.Mode == OperationMode.Frac && !IsValveClosed(well, ValveNames.Crown));
-                AddWrite(nodesToWrite, wellBasePath, "Alarms/Zipper_Open", well.Mode == OperationMode.Wireline && IsValveOpen(well, ValveNames.Zipper));
-                AddWrite(nodesToWrite, wellBasePath, "Alarms/Flowback_NotClosed", well.Mode == OperationMode.Frac &&
-                    (IsValveOpen(well, ValveNames.InnerFlowback) || IsValveOpen(well, ValveNames.OuterFlowback)));
-                AddWrite(nodesToWrite, wellBasePath, "Alarms/PumpDown_NotClosed", well.Mode == OperationMode.Wireline &&
-                    (IsValveOpen(well, ValveNames.InnerPumpDown) || IsValveOpen(well, ValveNames.OuterPumpDown)));
-                AddWrite(nodesToWrite, wellBasePath, "Alarms/Wireline_PumpdownOpen", well.Mode == OperationMode.Wireline &&
-                    (IsValveOpen(well, ValveNames.InnerPumpDown) || IsValveOpen(well, ValveNames.OuterPumpDown)));
-                AddWrite(nodesToWrite, wellBasePath, "Alarms/Wireline_ZipperOpen", well.Mode == OperationMode.Wireline && IsValveOpen(well, ValveNames.Zipper));
-                AddWrite(nodesToWrite, wellBasePath, "Alarms/FracWell_NotEqualized", well.Mode == OperationMode.Frac && IsValveClosed(well, ValveNames.Equalizing));
+                for (int index = 0; index < snapshot.Wells.Count; index++)
+                {
+                    AddWellWrites(nodesToWrite, snapshot, index);
+                }
+            }
+            else
+            {
+                int activeWellIndex = GetActiveWellIndex(snapshot);
+                AddWellWrites(nodesToWrite, snapshot, activeWellIndex);
             }
 
             if (nodesToWrite.Count == 0)
@@ -640,6 +609,92 @@ namespace Well_Sim
             }
 
             Debug.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] Wrote snapshot ({nodesToWrite.Count} tags).");
+        }
+
+        private static void AddWellWrites(WriteValueCollection nodesToWrite, SimulationSnapshot snapshot, int wellIndex)
+        {
+            WellSnapshot well = snapshot.Wells[wellIndex];
+            string wellBasePath = $"[{IgnitionTagProvider}]{IgnitionPadFolder}/Well{wellIndex + 1}";
+
+            AddWrite(nodesToWrite, wellBasePath, "Name", well.Name);
+            AddWrite(nodesToWrite, wellBasePath, "Last Known Name", well.Name);
+            AddWrite(nodesToWrite, wellBasePath, "Mode", GetIgnitionModeValue(well.Mode));
+            AddWrite(nodesToWrite, wellBasePath, "Color", (int)well.Color);
+            AddWrite(nodesToWrite, wellBasePath, "WellPressure", Convert.ToInt32(Math.Round(well.WellPressure)));
+            AddWrite(nodesToWrite, wellBasePath, "PumpdownPressure", Convert.ToInt32(Math.Round(well.PumpDownPressure)));
+            AddWrite(nodesToWrite, wellBasePath, "FracPressure", Convert.ToInt32(Math.Round(snapshot.FracPressure)));
+            AddWrite(nodesToWrite, wellBasePath, "WirelinePressure", Convert.ToInt32(Math.Round(well.WirelinePressure)));
+            AddWrite(nodesToWrite, wellBasePath, "Wireline A Selected", well.CurrentCrew == Crew.A);
+            //AddWrite(nodesToWrite, wellBasePath, "Wireline B Selected", well.CurrentCrew == Crew.B);
+
+            AddWrite(nodesToWrite, wellBasePath, "CrownOpened", IsValveOpen(well, ValveNames.Crown));
+            AddWrite(nodesToWrite, wellBasePath, "CrownClosed", IsValveClosed(well, ValveNames.Crown));
+            AddWrite(nodesToWrite, wellBasePath, "ZipperOpened", IsValveOpen(well, ValveNames.Zipper));
+            AddWrite(nodesToWrite, wellBasePath, "ZipperClosed", IsValveClosed(well, ValveNames.Zipper));
+            AddWrite(nodesToWrite, wellBasePath, "PDEqualOpened", IsValveOpen(well, ValveNames.Equalizing));
+            AddWrite(nodesToWrite, wellBasePath, "PDEqualClosed", IsValveClosed(well, ValveNames.Equalizing));
+            AddWrite(nodesToWrite, wellBasePath, "InnerPD Opened", IsValveOpen(well, ValveNames.InnerPumpDown));
+            AddWrite(nodesToWrite, wellBasePath, "InnerPD Closed", IsValveClosed(well, ValveNames.InnerPumpDown));
+            AddWrite(nodesToWrite, wellBasePath, "OuterPDOpened", IsValveOpen(well, ValveNames.OuterPumpDown));
+            AddWrite(nodesToWrite, wellBasePath, "OuterPDClosed", IsValveClosed(well, ValveNames.OuterPumpDown));
+            AddWrite(nodesToWrite, wellBasePath, "Inner Flowback Opened", IsValveOpen(well, ValveNames.InnerFlowback));
+            AddWrite(nodesToWrite, wellBasePath, "Inner Flowback Closed", IsValveClosed(well, ValveNames.InnerFlowback));
+            AddWrite(nodesToWrite, wellBasePath, "Outer Flowback Opened", IsValveOpen(well, ValveNames.OuterFlowback));
+            AddWrite(nodesToWrite, wellBasePath, "Outer Flowback Closed", IsValveClosed(well, ValveNames.OuterFlowback));
+            AddWrite(nodesToWrite, wellBasePath, "HMV Opened", IsValveOpen(well, ValveNames.Master));
+            AddWrite(nodesToWrite, wellBasePath, "HMV Closed", IsValveClosed(well, ValveNames.Master));
+            AddWrite(nodesToWrite, wellBasePath, "Lower Zipper Opened", IsValveOpen(well, ValveNames.LowerZipper));
+            AddWrite(nodesToWrite, wellBasePath, "Lower Zipper Closed", IsValveClosed(well, ValveNames.LowerZipper));
+
+            AddWrite(nodesToWrite, wellBasePath, "Alarms/Crown_Open", well.Mode == OperationMode.Frac && IsValveOpen(well, ValveNames.Crown));
+            AddWrite(nodesToWrite, wellBasePath, "Alarms/Crown_NotClosed", well.Mode == OperationMode.Frac && !IsValveClosed(well, ValveNames.Crown));
+            AddWrite(nodesToWrite, wellBasePath, "Alarms/Zipper_Open", well.Mode == OperationMode.Wireline && IsValveOpen(well, ValveNames.Zipper));
+            AddWrite(nodesToWrite, wellBasePath, "Alarms/Flowback_NotClosed", well.Mode == OperationMode.Frac &&
+                (IsValveOpen(well, ValveNames.InnerFlowback) || IsValveOpen(well, ValveNames.OuterFlowback)));
+            AddWrite(nodesToWrite, wellBasePath, "Alarms/PumpDown_NotClosed", well.Mode == OperationMode.Wireline &&
+                (IsValveOpen(well, ValveNames.InnerPumpDown) || IsValveOpen(well, ValveNames.OuterPumpDown)));
+            AddWrite(nodesToWrite, wellBasePath, "Alarms/Wireline_PumpdownOpen", well.Mode == OperationMode.Wireline &&
+                (IsValveOpen(well, ValveNames.InnerPumpDown) || IsValveOpen(well, ValveNames.OuterPumpDown)));
+            AddWrite(nodesToWrite, wellBasePath, "Alarms/Wireline_ZipperOpen", well.Mode == OperationMode.Wireline && IsValveOpen(well, ValveNames.Zipper));
+            AddWrite(nodesToWrite, wellBasePath, "Alarms/FracWell_NotEqualized", well.Mode == OperationMode.Frac && IsValveClosed(well, ValveNames.Equalizing));
+        }
+
+        private static int GetActiveWellIndex(SimulationSnapshot snapshot)
+        {
+            if (snapshot.Wells.Count == 0)
+            {
+                return 0;
+            }
+
+            // Prefer wells that are clearly "active" first.
+            for (int i = 0; i < snapshot.Wells.Count; i++)
+            {
+                WellSnapshot well = snapshot.Wells[i];
+                if (well.Mode != OperationMode.Standby)
+                {
+                    return i;
+                }
+            }
+
+            for (int i = 0; i < snapshot.Wells.Count; i++)
+            {
+                WellSnapshot well = snapshot.Wells[i];
+                if (well.CurrentCrew != Crew.None)
+                {
+                    return i;
+                }
+            }
+
+            for (int i = 0; i < snapshot.Wells.Count; i++)
+            {
+                WellSnapshot well = snapshot.Wells[i];
+                if (IsValveOpen(well, ValveNames.Zipper) || IsValveOpen(well, ValveNames.LowerZipper))
+                {
+                    return i;
+                }
+            }
+
+            return 0;
         }
 
         private static bool IsValveOpen(WellSnapshot well, ValveNames valve) =>
