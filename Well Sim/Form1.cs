@@ -22,7 +22,7 @@ namespace Well_Sim
         private CancellationTokenSource? _cts;
         private Task? _writeLoopTask;
         private readonly Dictionary<string, int> _userPinsByRole = new(StringComparer.OrdinalIgnoreCase);
-        private readonly Dictionary<int, (bool ZipperOpened, bool LowerZipperOpened)> _lastValveStatesByWell = new();
+        private readonly Dictionary<int, Dictionary<ValveNames, ValvePositions>> _lastValveStatesByWell = new();
         private bool _sentInitialFullSnapshot;
 
         public frmWellSim()
@@ -440,110 +440,143 @@ namespace Well_Sim
 
         private async Task SimulateHmiForValveTransitionsAsync(Session session, SimulationSnapshot snapshot, CancellationToken ct)
         {
-            // iterate through wells in snapshot
             for (int i = 0; i < snapshot.Wells.Count; i++)
             {
                 WellSnapshot well = snapshot.Wells[i];
                 int wellNumber = i + 1;
-
-                // did the zipper valve open this snapshot?
-                bool zipperOpened = well.Valves.TryGetValue(ValveNames.Zipper, out ValvePositions zipperPos) &&
-                                    zipperPos == ValvePositions.Opened;
-                // did lower zipper valve open this snapshot?
-                bool lowerZipperOpened = well.Valves.TryGetValue(ValveNames.LowerZipper, out ValvePositions lowerPos) &&
-                                         lowerPos == ValvePositions.Opened;
-                bool isActionComplete;
-                if (zipperOpened == lowerZipperOpened)
-                {
-                    isActionComplete = true;
-                }
-                else
-                {
-                    isActionComplete = false;
-                }
+                Dictionary<ValveNames, ValvePositions> currentStates = GetTrackedValveStates(well);
 
                 if (!_lastValveStatesByWell.TryGetValue(wellNumber, out var last))
                 {
-                    _lastValveStatesByWell[wellNumber] = (zipperOpened, lowerZipperOpened);
+                    _lastValveStatesByWell[wellNumber] = currentStates;
                     continue;
                 }
 
-                if (zipperOpened != last.ZipperOpened)
+                foreach (var (valveName, currentPosition) in currentStates)
                 {
-                    await SimulateHmiZipperActionAsync(session, wellNumber, isLowerZipper: false, open: zipperOpened, ct, isActionComplete);
+                    ValvePositions lastPosition = last.TryGetValue(valveName, out ValvePositions trackedPosition)
+                        ? trackedPosition
+                        : ValvePositions.Closed;
+
+                    if (currentPosition != lastPosition)
+                    {
+                        bool isZipperActionComplete =
+                            currentStates[ValveNames.Zipper] == currentStates[ValveNames.LowerZipper];
+
+                        await SimulateHmiValveActionAsync(
+                            session,
+                            wellNumber,
+                            valveName,
+                            currentPosition == ValvePositions.Opened,
+                            ct,
+                            isZipperActionComplete);
+                    }
                 }
 
-                if (lowerZipperOpened != last.LowerZipperOpened)
-                {
-                    await SimulateHmiZipperActionAsync(session, wellNumber, isLowerZipper: true, open: lowerZipperOpened, ct, isActionComplete);
-                }
-
-                _lastValveStatesByWell[wellNumber] = (zipperOpened, lowerZipperOpened);
+                _lastValveStatesByWell[wellNumber] = currentStates;
             }
         }
 
-        private async Task SimulateHmiZipperActionAsync(Session session, int wellNumber, bool isLowerZipper, bool open, CancellationToken ct, bool isActionComplete)
+        private async Task SimulateHmiValveActionAsync(Session session, int wellNumber, ValveNames valveName, bool open, CancellationToken ct, bool isZipperActionComplete)
         {
+            if (!TryGetHmiActionName(valveName, open, out string? actionName))
+            {
+                return;
+            }
+
             string wellBasePath = $"[{IgnitionTagProvider}]{IgnitionPadFolder}/Well{wellNumber}";
             string zipperPinsBase = $"[{IgnitionTagProvider}]Zipper Pins";
-
-            string modeFracPath = $"{wellBasePath}/HMI/Modes/Frac";
-            string actionName = isLowerZipper
-                ? (open ? "Lower Zipper Open" : "Lower Zipper Close")
-                : (open ? "Zipper Open" : "Zipper Close");
             string actionPath = $"{wellBasePath}/HMI/Actions/{actionName}";
+            bool requiresMode = valveName is ValveNames.Zipper or ValveNames.LowerZipper;
+            string? modePath = requiresMode
+                ? (open
+                    ? $"{wellBasePath}/HMI/Modes/Frac"
+                    : $"{wellBasePath}/HMI/Modes/Remove Frac")
+                : null;
 
             var pins = new
             {
                 VT = _userPinsByRole.TryGetValue("VT", out int vt) ? vt : 0,
                 WSM = _userPinsByRole.TryGetValue("WSM", out int wsm) ? wsm : 0,
-                Frac = _userPinsByRole.TryGetValue("Frac", out int frac) ? frac : 0,
                 Wline = _userPinsByRole.TryGetValue("Wireline", out int wline) ? wline : 0,
             };
 
-            // 1) Set Frac mode first.
-            await WriteIgnitionTagsAsync(session, new (string Path, object Value)[]
-            {
-                (modeFracPath, true),
-            }, ct);
+            Debug.WriteLine($"Simulating HMI action for Well {wellNumber} {actionName} - Pins: VT={pins.VT}, WSM={pins.WSM}, Wline={pins.Wline}");
 
-            // 2) Enter pins into Zipper Pins/* Pin and set * Pin Ok true as they arrive.
-            await WriteIgnitionTagsAsync(session, new (string Path, object Value)[]
+            var pinWrites = new List<(string Path, object Value)>();
+            if (modePath is not null)
             {
-                ($"{zipperPinsBase}/VT Pin", pins.VT),
-                ($"{zipperPinsBase}/VT Pin Ok", pins.VT != 0),
-                ($"{zipperPinsBase}/WSM Pin", pins.WSM),
-                ($"{zipperPinsBase}/WSM Pin Ok", pins.WSM != 0),
-                ($"{zipperPinsBase}/Frac Pin", pins.Frac),
-                ($"{zipperPinsBase}/Frac Pin Ok", pins.Frac != 0),
-                ($"{zipperPinsBase}/Wline Pin", pins.Wline),
-                ($"{zipperPinsBase}/Wline Pin Ok", pins.Wline != 0),
-            }, ct);
+                pinWrites.Add((modePath, true));
+            }
 
-            // 3) Trigger the valve action.
+            pinWrites.Add(($"{zipperPinsBase}/VT Pin", pins.VT));
+            pinWrites.Add(($"{zipperPinsBase}/VT Pin Ok", pins.VT != 0));
+            pinWrites.Add(($"{zipperPinsBase}/WSM Pin", pins.WSM));
+            pinWrites.Add(($"{zipperPinsBase}/WSM Pin Ok", pins.WSM != 0));
+            pinWrites.Add(($"{zipperPinsBase}/Wline Pin", pins.Wline));
+            pinWrites.Add(($"{zipperPinsBase}/Wline Pin Ok", pins.Wline != 0));
+
+            // 1) For all valves, enter WSM/VT/Wline pins. Zippers also assert their mode.
+            await WriteIgnitionTagsAsync(session, pinWrites, ct);
+
+            await Task.Delay(TimeSpan.FromSeconds(1), ct);
+
+            // 2) Trigger the matching HMI action.
             await WriteIgnitionTagsAsync(session, new (string Path, object Value)[]
             {
                 (actionPath, true),
             }, ct);
 
-            // 4) Clear mode, action, and pins after the "action completes".
-            // This is intentionally short so the HMI sees the transition.
-            await Task.Delay(TimeSpan.FromMilliseconds(2000), ct);
+            await Task.Delay(TimeSpan.FromSeconds(1), ct);
 
-            await WriteIgnitionTagsAsync(session, new (string Path, object Value)[]
+            // 3) Clear the pins and the action pulse.
+            var clearWrites = new List<(string Path, object Value)>();
+            if (modePath is not null)
             {
-                (modeFracPath, !isActionComplete),
-                (actionPath, false),
+                clearWrites.Add((modePath, !isZipperActionComplete));
+            }
 
-                ($"{zipperPinsBase}/VT Pin", 0),
-                ($"{zipperPinsBase}/VT Pin Ok", false),
-                ($"{zipperPinsBase}/WSM Pin", 0),
-                ($"{zipperPinsBase}/WSM Pin Ok", false),
-                ($"{zipperPinsBase}/Frac Pin", 0),
-                ($"{zipperPinsBase}/Frac Pin Ok", false),
-                ($"{zipperPinsBase}/Wline Pin", 0),
-                ($"{zipperPinsBase}/Wline Pin Ok", false),
-            }, ct);
+            clearWrites.Add((actionPath, false));
+            clearWrites.Add(($"{zipperPinsBase}/VT Pin", 0));
+            clearWrites.Add(($"{zipperPinsBase}/VT Pin Ok", false));
+            clearWrites.Add(($"{zipperPinsBase}/WSM Pin", 0));
+            clearWrites.Add(($"{zipperPinsBase}/WSM Pin Ok", false));
+            clearWrites.Add(($"{zipperPinsBase}/Wline Pin", 0));
+            clearWrites.Add(($"{zipperPinsBase}/Wline Pin Ok", false));
+
+            await WriteIgnitionTagsAsync(session, clearWrites, ct);
+            Debug.WriteLine($"Completed HMI action for Well {wellNumber} {actionName}");
+        }
+
+        private static Dictionary<ValveNames, ValvePositions> GetTrackedValveStates(WellSnapshot well)
+        {
+            var trackedStates = new Dictionary<ValveNames, ValvePositions>();
+
+            foreach (ValveNames valveName in Enum.GetValues<ValveNames>())
+            {
+                trackedStates[valveName] = well.Valves.TryGetValue(valveName, out ValvePositions position)
+                    ? position
+                    : ValvePositions.Closed;
+            }
+
+            return trackedStates;
+        }
+
+        private static bool TryGetHmiActionName(ValveNames valveName, bool open, out string? actionName)
+        {
+            actionName = valveName switch
+            {
+                ValveNames.Master => open ? "HMV Open" : "HMV Close",
+                ValveNames.Zipper => open ? "Zipper Open" : "Zipper Close",
+                ValveNames.LowerZipper => open ? "Lower Zipper Open" : "Lower Zipper Close",
+                ValveNames.Crown => open ? "Crown Open" : "Crown Close",
+                ValveNames.InnerPumpDown => open ? "PD Inner Open" : "PD Inner Close",
+                ValveNames.OuterPumpDown => open ? "PD Outer Open" : "PD Outer Close",
+                ValveNames.Equalizing => open ? "PD Equal Open" : "PD Equal Close",
+                _ => null
+            };
+
+            return actionName is not null;
         }
 
         private static async Task WriteIgnitionTagsAsync(Session session, IReadOnlyList<(string Path, object Value)> writes, CancellationToken ct)
