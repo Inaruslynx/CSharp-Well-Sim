@@ -25,6 +25,48 @@ namespace Well_Sim
         private readonly Dictionary<string, int> _userPinsByRole = new(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<int, Dictionary<ValveNames, ValvePositions>> _lastValveStatesByWell = new();
         private bool _sentInitialFullSnapshot;
+        private const int FirstWellNumber = 1;
+        private const int LastWellNumber = 12;
+        private static readonly string[] HmiActionNames =
+        [
+            "PD Outer Close",
+            "PD Equal Open",
+            "PD Inner Open",
+            "Zipper Open",
+            "PD Outer Open",
+            "PD Inner Close",
+            "Balldrop Crown Close",
+            "HMV Open",
+            "HMV Close",
+            "PD Equal Close",
+            "Crown Close",
+            "Zipper Close",
+            "Balldrop Crown Open",
+            "Lower Zipper Close",
+            "Lower Zipper Open",
+            "Crown Open",
+        ];
+        private static readonly string[] HmiModeNames =
+        [
+            "WireLine",
+            "Flow Back",
+            "Balldrop Frac",
+            "Frac",
+            "Remove Frac",
+        ];
+        private static readonly string[] ZipperPinRoleNames =
+        [
+            "WSM",
+            "Wline",
+            "VT",
+            "Frac",
+        ];
+        private static readonly string[] WirelinePinRoleNames =
+        [
+            "Wline",
+            "VT",
+            "WSM",
+        ];
 
         public frmWellSim()
         {
@@ -39,7 +81,7 @@ namespace Well_Sim
         {
             if (_session?.Connected == true)
             {
-                StartSimulation();
+                await StartSimulationAsync(_session);
                 return;
             }
 
@@ -101,7 +143,7 @@ namespace Well_Sim
                 LogSessionNamespaceTable(_session);
                 await LoadUserPinsAsync(_session);
                 _sentInitialFullSnapshot = false;
-                StartSimulation();
+                await StartSimulationAsync(_session);
                 _writeLoopTask = StartWriteLoopAsync(_session, TimeSpan.FromMilliseconds(rate));
             }
             catch (Exception ex)
@@ -124,6 +166,13 @@ namespace Well_Sim
             try
             {
                 _simulator.Stop();
+                Session? session = _session;
+                if (session?.Connected == true)
+                {
+                    await StopWriteLoopAsync();
+                    await ClearHmiAsync(session, CancellationToken.None);
+                }
+
                 await DisconnectAsync();
                 SetStatus("Off");
             }
@@ -319,8 +368,10 @@ namespace Well_Sim
             return new UserIdentity(username, System.Text.Encoding.UTF8.GetBytes(txtPassword.Text));
         }
 
-        private void StartSimulation()
+        private async Task StartSimulationAsync(Session session)
         {
+            await ClearHmiAsync(session, CancellationToken.None);
+            _lastValveStatesByWell.Clear();
             _simulator.Start();
         }
 
@@ -636,6 +687,50 @@ namespace Well_Sim
             return actionName is not null;
         }
 
+        private static async Task ClearHmiAsync(Session session, CancellationToken ct)
+        {
+            var writes = new List<(string Path, object Value)>();
+
+            for (int wellNumber = FirstWellNumber; wellNumber <= LastWellNumber; wellNumber++)
+            {
+                string wellBasePath = $"[{IgnitionTagProvider}]{IgnitionPadFolder}/Well{wellNumber}";
+
+                foreach (string actionName in HmiActionNames)
+                {
+                    writes.Add(($"{wellBasePath}/HMI/Actions/{actionName}", false));
+                }
+
+                foreach (string modeName in HmiModeNames)
+                {
+                    writes.Add(($"{wellBasePath}/HMI/Modes/{modeName}", false));
+                }
+
+                string wirelineEntriesBase = $"{wellBasePath}/HMI/Pin Entry/Wireline Entries";
+                foreach (string crewName in new[] { "Crew A", "Crew B" })
+                {
+                    foreach (string pinRoleName in WirelinePinRoleNames)
+                    {
+                        writes.Add(($"{wirelineEntriesBase}/{crewName}/{pinRoleName} Pin", 0));
+                    }
+                }
+
+                foreach (string pinRoleName in WirelinePinRoleNames)
+                {
+                    writes.Add(($"{wirelineEntriesBase}/{pinRoleName} Pin Ok", false));
+                }
+            }
+
+            string zipperPinsBase = $"[{IgnitionTagProvider}]Zipper Pins";
+            foreach (string pinRoleName in ZipperPinRoleNames)
+            {
+                writes.Add(($"{zipperPinsBase}/{pinRoleName} Pin", 0));
+                writes.Add(($"{zipperPinsBase}/{pinRoleName} Pin Ok", false));
+            }
+
+            await WriteIgnitionTagsAsync(session, writes, ct);
+            Debug.WriteLine($"Cleared HMI actions, modes, and pins ({writes.Count} tags).");
+        }
+
         private static async Task WriteIgnitionTagsAsync(Session session, IReadOnlyList<(string Path, object Value)> writes, CancellationToken ct)
         {
             if (writes.Count == 0)
@@ -853,24 +948,7 @@ namespace Well_Sim
                 return;
             }
 
-            CancellationTokenSource? cts;
-            lock (this)
-            {
-                cts = _cts;
-                _cts = null;
-            }
-
-            if (cts is not null)
-            {
-                try
-                {
-                    cts.Cancel();
-                }
-                finally
-                {
-                    cts.Dispose();
-                }
-            }
+            await StopWriteLoopAsync();
 
             Session session = _session;
             _session = null;
@@ -881,6 +959,38 @@ namespace Well_Sim
             }
 
             session.Dispose();
+        }
+
+        private async Task StopWriteLoopAsync()
+        {
+            CancellationTokenSource? cts;
+            Task? writeLoopTask;
+            lock (this)
+            {
+                cts = _cts;
+                _cts = null;
+                writeLoopTask = _writeLoopTask;
+                _writeLoopTask = null;
+            }
+
+            if (cts is not null)
+            {
+                cts.Cancel();
+            }
+
+            if (writeLoopTask is not null)
+            {
+                try
+                {
+                    await writeLoopTask;
+                }
+                catch (OperationCanceledException)
+                {
+                    // expected on shutdown
+                }
+            }
+
+            cts?.Dispose();
         }
 
         private void SetStatus(string statusText)
