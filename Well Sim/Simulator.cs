@@ -199,6 +199,7 @@ namespace Well_Sim
 
     internal sealed class Simulator : IDisposable
     {
+        private static readonly TimeSpan StageTransitionPause = TimeSpan.FromSeconds(1);
         private readonly Random _random = new();
         private readonly Lock _sync = new();
         private readonly Dictionary<Crew, System.Timers.Timer> _crewTimers = new();
@@ -446,7 +447,7 @@ namespace Well_Sim
                     status = $"Crew {crew} assigned to {assignedWell.Name} and is checking valves.";
                     TimeSpan stageDuration = RandomStageDuration(CrewStage.CheckingValves);
                     ApplyStage(assignedWell, crew, CrewStage.CheckingValves, stageDuration);
-                    ScheduleCrew(crew, stageDuration);
+                    ScheduleCrew(crew, stageDuration + StageTransitionPause);
                 }
                 else
                 {
@@ -463,7 +464,8 @@ namespace Well_Sim
                         well.CurrentCrew = Crew.None;
                     }
 
-                    ScheduleCrew(crew, stageDuration);
+                    // Leave a small gap between stages so valve changes do not look instantaneous.
+                    ScheduleCrew(crew, stageDuration + StageTransitionPause);
                 }
             }
 

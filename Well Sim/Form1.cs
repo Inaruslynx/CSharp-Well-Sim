@@ -1,3 +1,4 @@
+using Microsoft.VisualBasic.ApplicationServices;
 using Opc.Ua;
 using Opc.Ua.Client;
 using Opc.Ua.Configuration;
@@ -10,7 +11,7 @@ namespace Well_Sim
     public partial class frmWellSim : Form
     {
         private const ushort IgnitionTagNamespaceIndex = 2;
-        private const string IgnitionTagProvider = "Demo";
+        private static string IgnitionTagProvider = "Demo";
         private const string IgnitionPadFolder = "Pad";
 
         private Opc.Ua.ApplicationConfiguration? _configuration;
@@ -58,6 +59,14 @@ namespace Well_Sim
                 return;
             }
 
+            IgnitionTagProvider = txtProvider.Text.Trim();
+            if (string.IsNullOrWhiteSpace(IgnitionTagProvider))
+            {
+                MessageBox.Show("Enter an OPC UA provider.", "Missing Provider", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                txtProvider.Focus();
+                return;
+            }
+
             if (!int.TryParse(txtRate.Text, out int rate) || rate <= 0)
             {
                 MessageBox.Show("Enter a valid update rate in milliseconds.", "Invalid Update Rate", MessageBoxButtons.OK, MessageBoxIcon.Warning);
@@ -89,6 +98,7 @@ namespace Well_Sim
                     null,
                     CancellationToken.None);
 
+                LogSessionNamespaceTable(_session);
                 await LoadUserPinsAsync(_session);
                 _sentInitialFullSnapshot = false;
                 StartSimulation();
@@ -96,9 +106,10 @@ namespace Well_Sim
             }
             catch (Exception ex)
             {
+                Debug.WriteLine($"Connection failure: {ex}");
                 await DisconnectAsync();
                 SetStatus("Connection failed");
-                MessageBox.Show($"Could not connect to the OPC UA server.\r\n\r\n{ex.Message}", "Connection Failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show($"Could not connect to the OPC UA server.\r\n\r\n{BuildExceptionMessage(ex)}", "Connection Failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
             finally
             {
@@ -198,23 +209,51 @@ namespace Well_Sim
         private async Task<EndpointDescription> SelectEndpointAsync(string endpointUrl)
         {
             string selectedPolicy = GetSelectedSecurityPolicyUri();
+            List<Exception> failures = new();
 
-            using var discoveryClient = DiscoveryClient.Create(new Uri(endpointUrl));
-            var endpoints = await discoveryClient.GetEndpointsAsync(null);
-
-            EndpointDescription? endpoint = endpoints
-                .Where(endpoint => EndpointMatchesSecuritySelection(endpoint, selectedPolicy))
-                .OrderByDescending(endpoint => endpoint.SecurityMode == MessageSecurityMode.SignAndEncrypt)
-                .ThenByDescending(endpoint => endpoint.SecurityLevel)
-                .FirstOrDefault();
-
-            if (endpoint is not null)
+            foreach (string discoveryUrl in GetDiscoveryUrls(endpointUrl))
             {
-                return endpoint;
+                try
+                {
+                    using var discoveryClient = DiscoveryClient.Create(new Uri(discoveryUrl));
+                    var endpoints = await discoveryClient.GetEndpointsAsync(null);
+
+                    EndpointDescription? endpoint = endpoints
+                        .Where(endpoint => EndpointMatchesSecuritySelection(endpoint, selectedPolicy))
+                        .OrderByDescending(endpoint => endpoint.SecurityMode == MessageSecurityMode.SignAndEncrypt)
+                        .ThenByDescending(endpoint => endpoint.SecurityLevel)
+                        .FirstOrDefault();
+
+                    if (endpoint is not null)
+                    {
+                        return endpoint;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    failures.Add(new InvalidOperationException($"Endpoint discovery failed for {discoveryUrl}: {ex.Message}", ex));
+                }
             }
 
             string securityName = GetSelectedSecurityDisplayName();
+            if (failures.Count > 0)
+            {
+                throw new AggregateException(
+                    $"The server could not be queried for endpoints matching the selected security mode: {securityName}.",
+                    failures);
+            }
+
             throw new InvalidOperationException($"The server does not expose an endpoint for the selected security mode: {securityName}.");
+        }
+
+        private static IEnumerable<string> GetDiscoveryUrls(string endpointUrl)
+        {
+            yield return endpointUrl;
+
+            if (!endpointUrl.EndsWith("/discovery", StringComparison.OrdinalIgnoreCase))
+            {
+                yield return $"{endpointUrl.TrimEnd('/')}/discovery";
+            }
         }
 
         private bool EndpointMatchesSecuritySelection(EndpointDescription endpoint, string selectedPolicy)
@@ -385,6 +424,12 @@ namespace Well_Sim
                             await SimulateHmiForValveTransitionsAsync(session, snapshot, cts.Token);
                         }
                     }
+                    catch (Exception ex)
+                    {
+                        string details = BuildExceptionMessage(ex);
+                        Debug.WriteLine($"Write loop failure: {details}");
+                        BeginInvoke(() => SetStatus($"Ignition tag write failed: {details}"));
+                    }
                     finally
                     {
                         _tagWriteGate.Release();
@@ -432,8 +477,9 @@ namespace Well_Sim
 
                 return Convert.ToInt32(dv.Value);
             }
-            catch
+            catch (Exception ex)
             {
+                Debug.WriteLine($"Failed to read pin tag {ignitionTagPath}: {BuildExceptionMessage(ex)}");
                 return null;
             }
         }
@@ -499,9 +545,10 @@ namespace Well_Sim
                 VT = _userPinsByRole.TryGetValue("VT", out int vt) ? vt : 0,
                 WSM = _userPinsByRole.TryGetValue("WSM", out int wsm) ? wsm : 0,
                 Wline = _userPinsByRole.TryGetValue("Wireline", out int wline) ? wline : 0,
+                Frac = requiresMode && _userPinsByRole.TryGetValue("Frac", out int frac) ? frac : 0, 
             };
 
-            Debug.WriteLine($"Simulating HMI action for Well {wellNumber} {actionName} - Pins: VT={pins.VT}, WSM={pins.WSM}, Wline={pins.Wline}");
+            Debug.WriteLine($"Simulating HMI action for Well {wellNumber} {actionName} - Pins: VT={pins.VT}, WSM={pins.WSM}, Wline={pins.Wline}{(pins.Frac != 0 ? $" Frac={pins.Frac}" : "")}");
 
             var pinWrites = new List<(string Path, object Value)>();
             if (modePath is not null)
@@ -515,6 +562,11 @@ namespace Well_Sim
             pinWrites.Add(($"{zipperPinsBase}/WSM Pin Ok", pins.WSM != 0));
             pinWrites.Add(($"{zipperPinsBase}/Wline Pin", pins.Wline));
             pinWrites.Add(($"{zipperPinsBase}/Wline Pin Ok", pins.Wline != 0));
+            if (requiresMode)
+            {
+                pinWrites.Add(($"{zipperPinsBase}/Frac Pin", pins.Frac));
+                pinWrites.Add(($"{zipperPinsBase}/Frac Pin Ok", pins.Frac != 0));
+            }
 
             // 1) For all valves, enter WSM/VT/Wline pins. Zippers also assert their mode.
             await WriteIgnitionTagsAsync(session, pinWrites, ct);
@@ -543,6 +595,11 @@ namespace Well_Sim
             clearWrites.Add(($"{zipperPinsBase}/WSM Pin Ok", false));
             clearWrites.Add(($"{zipperPinsBase}/Wline Pin", 0));
             clearWrites.Add(($"{zipperPinsBase}/Wline Pin Ok", false));
+            if (requiresMode)
+            {
+                clearWrites.Add(($"{zipperPinsBase}/Frac Pin", 0));
+                clearWrites.Add(($"{zipperPinsBase}/Frac Pin Ok", false));
+            }
 
             await WriteIgnitionTagsAsync(session, clearWrites, ct);
             Debug.WriteLine($"Completed HMI action for Well {wellNumber} {actionName}");
@@ -605,6 +662,41 @@ namespace Well_Sim
                 {
                     throw new ServiceResultException(status, $"Ignition write failed for {nodesToWrite[i].NodeId}.");
                 }
+            }
+        }
+
+        private static string BuildExceptionMessage(Exception ex)
+        {
+            var messages = new List<string>();
+
+            for (Exception? current = ex; current is not null; current = current.InnerException)
+            {
+                if (current is ServiceResultException serviceResultException)
+                {
+                    messages.Add($"{serviceResultException.Message} ({serviceResultException.StatusCode})");
+                }
+                else
+                {
+                    messages.Add(current.Message);
+                }
+            }
+
+            return string.Join("\r\n\r\n", messages.Distinct());
+        }
+
+        private static void LogSessionNamespaceTable(Session session)
+        {
+            try
+            {
+                Debug.WriteLine("OPC UA namespace table:");
+                for (int i = 0; i < session.NamespaceUris.Count; i++)
+                {
+                    Debug.WriteLine($"  ns={i} -> {session.NamespaceUris.GetString((ushort)i)}");
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"Failed to inspect namespace table: {ex.Message}");
             }
         }
 
@@ -799,11 +891,11 @@ namespace Well_Sim
         private void ToggleControls(bool isConnecting)
         {
             btnStart.Enabled = !isConnecting;
-            btnStop.Enabled = !isConnecting;
             txtAddress.Enabled = !isConnecting;
             txtPort.Enabled = !isConnecting;
             txtUsername.Enabled = !isConnecting;
             txtPassword.Enabled = !isConnecting;
+            txtProvider.Enabled = !isConnecting;
             radNone.Enabled = !isConnecting;
             radBasic256Sha256.Enabled = !isConnecting;
             radAes128_Sha256_RsaOaep.Enabled = !isConnecting;

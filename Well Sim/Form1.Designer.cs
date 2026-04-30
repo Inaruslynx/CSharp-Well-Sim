@@ -48,6 +48,8 @@
             groupBox3 = new GroupBox();
             txtRate = new TextBox();
             label5 = new Label();
+            txtProvider = new TextBox();
+            label6 = new Label();
             groupBox1.SuspendLayout();
             groupBox2.SuspendLayout();
             groupBox3.SuspendLayout();
@@ -56,7 +58,7 @@
             // btnStart
             // 
             btnStart.Anchor = AnchorStyles.Bottom | AnchorStyles.Left;
-            btnStart.Location = new Point(12, 275);
+            btnStart.Location = new Point(12, 312);
             btnStart.Name = "btnStart";
             btnStart.Size = new Size(148, 63);
             btnStart.TabIndex = 0;
@@ -67,7 +69,7 @@
             // btnStop
             // 
             btnStop.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
-            btnStop.Location = new Point(367, 275);
+            btnStop.Location = new Point(440, 312);
             btnStop.Name = "btnStop";
             btnStop.Size = new Size(148, 63);
             btnStop.TabIndex = 1;
@@ -113,11 +115,11 @@
             // 
             // groupBox1
             // 
-            groupBox1.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+            groupBox1.Anchor = AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
             groupBox1.Controls.Add(txtStatus);
-            groupBox1.Location = new Point(21, 206);
+            groupBox1.Location = new Point(12, 243);
             groupBox1.Name = "groupBox1";
-            groupBox1.Size = new Size(494, 63);
+            groupBox1.Size = new Size(576, 63);
             groupBox1.TabIndex = 6;
             groupBox1.TabStop = false;
             groupBox1.Text = "Status";
@@ -129,7 +131,7 @@
             txtStatus.Location = new Point(11, 22);
             txtStatus.Name = "txtStatus";
             txtStatus.ReadOnly = true;
-            txtStatus.Size = new Size(474, 23);
+            txtStatus.Size = new Size(556, 23);
             txtStatus.TabIndex = 0;
             txtStatus.Text = "Off";
             txtStatus.TextAlign = HorizontalAlignment.Right;
@@ -228,6 +230,8 @@
             // 
             // groupBox3
             // 
+            groupBox3.Controls.Add(txtProvider);
+            groupBox3.Controls.Add(label6);
             groupBox3.Controls.Add(txtRate);
             groupBox3.Controls.Add(label5);
             groupBox3.Controls.Add(label1);
@@ -240,7 +244,7 @@
             groupBox3.Controls.Add(label3);
             groupBox3.Location = new Point(21, 12);
             groupBox3.Name = "groupBox3";
-            groupBox3.Size = new Size(210, 173);
+            groupBox3.Size = new Size(210, 211);
             groupBox3.TabIndex = 12;
             groupBox3.TabStop = false;
             groupBox3.Text = "Connection Info";
@@ -263,11 +267,29 @@
             label5.TabIndex = 11;
             label5.Text = "Update Rate (ms):";
             // 
+            // txtProvider
+            // 
+            txtProvider.Location = new Point(88, 172);
+            txtProvider.Name = "txtProvider";
+            txtProvider.Size = new Size(116, 23);
+            txtProvider.TabIndex = 14;
+            txtProvider.Text = "Demo";
+            txtProvider.TextAlign = HorizontalAlignment.Right;
+            // 
+            // label6
+            // 
+            label6.AutoSize = true;
+            label6.Location = new Point(6, 176);
+            label6.Name = "label6";
+            label6.Size = new Size(76, 15);
+            label6.TabIndex = 13;
+            label6.Text = "Tag Provider:";
+            // 
             // frmWellSim
             // 
             AutoScaleDimensions = new SizeF(7F, 15F);
             AutoScaleMode = AutoScaleMode.Font;
-            ClientSize = new Size(527, 350);
+            ClientSize = new Size(600, 387);
             Controls.Add(groupBox3);
             Controls.Add(groupBox2);
             Controls.Add(groupBox1);
@@ -306,5 +328,7 @@
         private GroupBox groupBox3;
         private TextBox txtRate;
         private Label label5;
+        private TextBox txtProvider;
+        private Label label6;
     }
 }
